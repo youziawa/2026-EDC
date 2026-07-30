@@ -1,0 +1,843 @@
+metadata:
+  name: land_air_cooperative_mission_state_machine
+  title: 陆空协同无人机系统统一状态机
+  version: "1.0"
+  language: zh-CN
+  human_document: 陆空协同统一状态机.md
+  protocol: LXS1
+  intended_consumers:
+    - firmware_engineer
+    - pyqt_ground_station_engineer
+    - code_generation_ai
+
+system:
+  description: 飞机、小车和电脑地面站组成的陆空协同系统
+  global_state_owner: aircraft_controller
+  mission_start_owner: car_controller
+  normal_operation_requires_ground_station: false
+  track_direction: clockwise
+  action_zone:
+    start: C
+    end: D
+
+devices:
+  aircraft_controller:
+    address: 0x02
+    responsibilities:
+      - own_global_state
+      - act_as_bluetooth_master
+      - route_car_telemetry_to_ground_station
+      - control_flight_controller
+      - execute_drop_or_dynamic_landing
+      - return_and_land_at_H
+  aircraft_k230:
+    address: 0x03
+    responsibilities:
+      - detect_car_and_platform
+      - publish_relative_pose
+      - publish_visual_confidence
+  car_controller:
+    address: 0x04
+    responsibilities:
+      - start_mission_from_physical_button
+      - follow_black_line
+      - maintain_odometry
+      - detect_track_events
+      - change_speed_in_action_zone
+      - stop_after_one_lap
+  car_k230:
+    address: 0x05
+    responsibilities:
+      - detect_black_line
+      - publish_line_error
+      - detect_finish_cross_line
+  ground_station:
+    address: 0x06
+    implementation: PyQt
+    responsibilities:
+      - visualize_map_and_trajectories
+      - display_states_and_faults
+      - record_csv_or_json_logs
+      - send_query
+      - send_emergency_abort
+    forbidden_responsibilities:
+      - own_global_state
+      - drive_car_during_official_mission
+      - manually_fly_aircraft_during_official_mission
+
+task_modes:
+  DROP:
+    code: 1
+    description: 抛投任务
+  DYNAMIC_LANDING:
+    code: 2
+    description: 动态起降任务
+
+global_states:
+  IDLE:
+    code: 0
+    description: 待机和自检
+  TAKEOFF:
+    code: 1
+    description: 从H点起飞至巡航高度
+  HOVER_3S:
+    code: 2
+    description: 抛投模式稳定悬停3秒
+  SEARCH:
+    code: 3
+    description: 搜索小车和平台
+  FOLLOW:
+    code: 4
+    description: 跟随小车并等待C点事件
+  DROP:
+    code: 5
+    description: 在C到D区间执行抛投
+  LAND_CAR:
+    code: 6
+    description: 在C到D区间降落到移动平台
+  WAIT_5S:
+    code: 7
+    description: 在移动平台稳定停留至少5秒
+  RETAKEOFF:
+    code: 8
+    description: 从移动平台再次起飞
+  RETURN:
+    code: 9
+    description: 返回H点
+  LAND_H:
+    code: 10
+    description: 降落到H点
+  DONE:
+    code: 11
+    description: 飞机任务完成
+  ABORT:
+    code: 12
+    description: 人工紧急中止
+  FAULT:
+    code: 13
+    description: 不可恢复故障
+
+car_states:
+  READY:
+    code: 0
+    description: 自检完成并等待按键
+  STARTING:
+    code: 1
+    description: 去抖、清零和锁存任务参数
+  NORMAL_TRACK:
+    code: 2
+    description: 正常速度循线
+  ACTION_SLOW:
+    code: 3
+    description: C到D动作区低速循线
+  LOST_HOLD:
+    code: 4
+    description: 短时丢线并保持最后转向
+  REACQUIRE:
+    code: 5
+    description: 低速寻找黑线
+  FINISH_CONFIRM:
+    code: 6
+    description: 完成一圈后的A点终点确认
+  DONE:
+    code: 7
+    description: 一圈完成并停车
+  ABORT:
+    code: 8
+    description: 人工中止并立即停车
+  FAULT:
+    code: 9
+    description: 不可恢复故障并停车
+
+track_events:
+  B_CROSS:
+    code: 1
+    trigger: path_mm >= point_b_path_mm
+  C_ENTER:
+    code: 2
+    trigger: path_mm >= point_c_path_mm and path_mm < point_d_path_mm
+    repeat_while_active: true
+  D_EXIT:
+    code: 3
+    trigger: path_mm >= point_d_path_mm
+  A_FINISH:
+    code: 4
+    trigger: path_mm >= finish_min_path_mm and finish_cross_line_detected
+
+parameters:
+  normal_speed_mm_s: 150
+  action_speed_mm_s: 80
+  reacquire_speed_mm_s: 40
+  point_b_path_mm: 1500
+  point_c_path_mm: 3856
+  point_d_path_mm: 5356
+  lap_path_mm: 7712
+  finish_min_path_mm: 7300
+  target_height_cm: 150
+  target_height_tolerance_cm: 10
+  hover_required_ms: 3000
+  platform_wait_required_ms: 5000
+  task_deadline_ms: 90000
+  point_b_deadline_ms: 15000
+  speed_ramp_required: true
+
+state_machines:
+  drop_mission:
+    initial_state: IDLE
+    transitions:
+      - from: IDLE
+        event: TASK_START
+        guards:
+          - task_mode == DROP
+          - run_id_is_new
+          - flight_controller_ready
+        to: TAKEOFF
+        entry_actions:
+          - latch_run_id
+          - reset_mission_timer
+          - command_takeoff_once
+        periodic_actions:
+          - publish_TASK_STATE
+        exit_actions:
+          - mark_takeoff_command_complete
+        timeout: 10000
+        failure_transition: FAULT
+      - from: TAKEOFF
+        event: TARGET_HEIGHT_STABLE
+        guards:
+          - abs(height_cm - target_height_cm) <= target_height_tolerance_cm
+          - vertical_speed_is_stable
+        to: HOVER_3S
+        entry_actions:
+          - start_hover_timer
+        periodic_actions:
+          - command_hold_position
+          - publish_TASK_STATE
+        exit_actions:
+          - clear_hover_timer
+        timeout: 15000
+        failure_transition: FAULT
+      - from: HOVER_3S
+        event: HOVER_TIMER_COMPLETE
+        guards:
+          - stable_duration_ms >= hover_required_ms
+        to: SEARCH
+        entry_actions:
+          - enable_target_search
+        periodic_actions:
+          - hold_cruise_height
+          - publish_TASK_STATE
+        exit_actions:
+          - retain_latest_target_estimate
+        timeout: null
+        failure_transition: null
+      - from: SEARCH
+        event: TARGET_LOCKED
+        guards:
+          - vision_target_valid
+          - vision_lock_is_stable
+        to: FOLLOW
+        entry_actions:
+          - initialize_follow_controller
+        periodic_actions:
+          - follow_car
+          - publish_TASK_STATE
+        exit_actions:
+          - retain_follow_controller_state
+        timeout: null
+        failure_transition: null
+      - from: SEARCH
+        event: C_ENTER
+        guards:
+          - event_run_id_matches
+          - action_not_previously_started
+        to: DROP
+        entry_actions:
+          - open_action_window
+          - mark_drop_started_once
+        periodic_actions:
+          - search_align_and_drop_when_stable
+          - publish_TASK_STATE
+          - publish_DROP_STATE
+        exit_actions:
+          - close_action_window
+        timeout: until_D_EXIT
+        failure_transition: RETURN
+      - from: FOLLOW
+        event: C_ENTER
+        guards:
+          - event_run_id_matches
+          - action_not_previously_started
+        to: DROP
+        entry_actions:
+          - open_action_window
+          - mark_drop_started_once
+        periodic_actions:
+          - align_and_drop_when_stable
+          - publish_TASK_STATE
+          - publish_DROP_STATE
+        exit_actions:
+          - close_action_window
+        timeout: until_D_EXIT
+        failure_transition: RETURN
+      - from: DROP
+        event: DROP_COMPLETE_OR_D_EXIT
+        guards:
+          - drop_completed or D_EXIT_received or action_timeout
+        to: RETURN
+        entry_actions:
+          - prohibit_additional_drop
+          - command_return_to_H
+        periodic_actions:
+          - navigate_to_H
+          - publish_TASK_STATE
+        exit_actions:
+          - initialize_H_landing
+        timeout: 30000
+        failure_transition: FAULT
+      - from: RETURN
+        event: H_LANDMARK_LOCKED
+        guards:
+          - H_landmark_valid
+          - aircraft_above_H
+        to: LAND_H
+        entry_actions:
+          - command_H_landing_once
+        periodic_actions:
+          - align_and_descend_to_H
+          - publish_TASK_STATE
+        exit_actions:
+          - command_disarm_when_safe
+        timeout: 20000
+        failure_transition: FAULT
+      - from: LAND_H
+        event: H_LANDING_CONFIRMED
+        guards:
+          - landed
+          - disarmed
+        to: DONE
+        entry_actions:
+          - store_final_result
+        periodic_actions:
+          - publish_TASK_STATE
+        exit_actions: []
+        timeout: 20000
+        failure_transition: FAULT
+
+  dynamic_landing_mission:
+    initial_state: IDLE
+    transitions:
+      - from: IDLE
+        event: TASK_START
+        guards:
+          - task_mode == DYNAMIC_LANDING
+          - run_id_is_new
+          - flight_controller_ready
+        to: TAKEOFF
+        entry_actions:
+          - latch_run_id
+          - reset_mission_timer
+          - command_takeoff_once
+        periodic_actions:
+          - publish_TASK_STATE
+        exit_actions:
+          - mark_takeoff_command_complete
+        timeout: 10000
+        failure_transition: FAULT
+      - from: TAKEOFF
+        event: TARGET_HEIGHT_STABLE
+        guards:
+          - abs(height_cm - target_height_cm) <= target_height_tolerance_cm
+          - vertical_speed_is_stable
+        to: SEARCH
+        entry_actions:
+          - enable_target_search
+        periodic_actions:
+          - hold_cruise_height
+          - publish_TASK_STATE
+        exit_actions:
+          - retain_latest_target_estimate
+        timeout: 15000
+        failure_transition: FAULT
+      - from: SEARCH
+        event: TARGET_LOCKED
+        guards:
+          - vision_target_valid
+          - vision_lock_is_stable
+        to: FOLLOW
+        entry_actions:
+          - initialize_follow_controller
+        periodic_actions:
+          - follow_car
+          - publish_TASK_STATE
+        exit_actions:
+          - retain_follow_controller_state
+        timeout: null
+        failure_transition: null
+      - from: SEARCH
+        event: C_ENTER
+        guards:
+          - event_run_id_matches
+          - action_not_previously_started
+        to: LAND_CAR
+        entry_actions:
+          - open_action_window
+          - mark_car_landing_started_once
+        periodic_actions:
+          - search_align_and_descend_when_stable
+          - publish_TASK_STATE
+          - publish_LAND_STATE
+        exit_actions:
+          - retain_platform_contact_state
+        timeout: until_D_EXIT
+        failure_transition: RETURN
+      - from: FOLLOW
+        event: C_ENTER
+        guards:
+          - event_run_id_matches
+          - action_not_previously_started
+        to: LAND_CAR
+        entry_actions:
+          - open_action_window
+          - mark_car_landing_started_once
+        periodic_actions:
+          - align_and_descend_to_platform
+          - publish_TASK_STATE
+          - publish_LAND_STATE
+        exit_actions:
+          - start_platform_stability_check
+        timeout: until_D_EXIT
+        failure_transition: RETURN
+      - from: LAND_CAR
+        event: PLATFORM_LANDING_CONFIRMED
+        guards:
+          - landed_on_platform
+          - relative_motion_is_stable
+        to: WAIT_5S
+        entry_actions:
+          - start_platform_wait_timer
+        periodic_actions:
+          - maintain_safe_platform_state
+          - publish_TASK_STATE
+          - publish_LAND_STATE
+        exit_actions:
+          - clear_platform_wait_timer
+        timeout: until_D_EXIT
+        failure_transition: RETURN
+      - from: WAIT_5S
+        event: PLATFORM_WAIT_COMPLETE
+        guards:
+          - stable_duration_ms >= platform_wait_required_ms
+        to: RETAKEOFF
+        entry_actions:
+          - command_platform_takeoff_once
+        periodic_actions:
+          - publish_TASK_STATE
+          - publish_LAND_STATE
+        exit_actions:
+          - mark_platform_takeoff_command_complete
+        timeout: until_D_EXIT
+        failure_transition: RETURN
+      - from: RETAKEOFF
+        event: TARGET_HEIGHT_STABLE
+        guards:
+          - abs(height_cm - target_height_cm) <= target_height_tolerance_cm
+          - aircraft_clear_of_platform
+        to: RETURN
+        entry_actions:
+          - close_action_window
+          - command_return_to_H
+        periodic_actions:
+          - navigate_to_H
+          - publish_TASK_STATE
+        exit_actions:
+          - initialize_H_landing
+        timeout: 15000
+        failure_transition: FAULT
+      - from: RETURN
+        event: H_LANDMARK_LOCKED
+        guards:
+          - H_landmark_valid
+          - aircraft_above_H
+        to: LAND_H
+        entry_actions:
+          - command_H_landing_once
+        periodic_actions:
+          - align_and_descend_to_H
+          - publish_TASK_STATE
+        exit_actions:
+          - command_disarm_when_safe
+        timeout: 30000
+        failure_transition: FAULT
+      - from: LAND_H
+        event: H_LANDING_CONFIRMED
+        guards:
+          - landed
+          - disarmed
+        to: DONE
+        entry_actions:
+          - store_final_result
+        periodic_actions:
+          - publish_TASK_STATE
+        exit_actions: []
+        timeout: 20000
+        failure_transition: FAULT
+
+  car:
+    initial_state: READY
+    transitions:
+      - from: READY
+        event: START_BUTTON_PRESSED
+        guards:
+          - button_debounced
+          - car_self_test_passed
+        to: STARTING
+        entry_actions:
+          - increment_run_id
+          - latch_compile_time_task_mode
+          - reset_odometry_and_lap
+        periodic_actions:
+          - keep_motor_disabled
+        exit_actions:
+          - publish_TASK_START
+        timeout: 1000
+        failure_transition: FAULT
+      - from: STARTING
+        event: START_INITIALIZATION_COMPLETE
+        guards:
+          - vision_link_available
+          - motor_controller_ready
+        to: NORMAL_TRACK
+        entry_actions:
+          - ramp_to_normal_speed
+        periodic_actions:
+          - follow_line
+          - publish_CAR_STATE
+          - publish_CAR_POSE
+        exit_actions:
+          - retain_line_controller_state
+        timeout: 2000
+        failure_transition: FAULT
+      - from: NORMAL_TRACK
+        event: C_ENTER
+        guards:
+          - path_mm >= point_c_path_mm
+          - path_mm < point_d_path_mm
+        to: ACTION_SLOW
+        entry_actions:
+          - ramp_to_action_speed
+          - latch_pre_loss_state_as_ACTION_SLOW
+        periodic_actions:
+          - follow_line
+          - publish_C_ENTER
+          - publish_CAR_STATE
+          - publish_CAR_POSE
+        exit_actions:
+          - retain_line_controller_state
+        timeout: action_slow_max_ms
+        failure_transition: NORMAL_TRACK
+      - from: ACTION_SLOW
+        event: RETURN_OR_D_EXIT
+        guards:
+          - aircraft_global_state == RETURN or path_mm >= point_d_path_mm or action_slow_timeout
+        to: NORMAL_TRACK
+        entry_actions:
+          - ramp_to_normal_speed
+        periodic_actions:
+          - follow_line
+          - publish_CAR_STATE
+          - publish_CAR_POSE
+        exit_actions:
+          - clear_action_zone_latch
+        timeout: null
+        failure_transition: null
+      - from: NORMAL_TRACK
+        event: LINE_LOST
+        guards:
+          - line_invalid
+        to: LOST_HOLD
+        entry_actions:
+          - save_pre_loss_state
+          - hold_last_steering
+        periodic_actions:
+          - use_reduced_speed
+          - publish_CAR_STATE
+        exit_actions:
+          - retain_last_valid_line
+        timeout: line_lost_hold_ms
+        failure_transition: REACQUIRE
+      - from: ACTION_SLOW
+        event: LINE_LOST
+        guards:
+          - line_invalid
+        to: LOST_HOLD
+        entry_actions:
+          - save_pre_loss_state
+          - hold_last_steering
+        periodic_actions:
+          - do_not_exceed_action_speed
+          - publish_CAR_STATE
+        exit_actions:
+          - retain_last_valid_line
+        timeout: line_lost_hold_ms
+        failure_transition: REACQUIRE
+      - from: LOST_HOLD
+        event: LINE_RECOVERED
+        guards:
+          - line_valid
+          - confidence_above_threshold
+        to: PREVIOUS_TRACK_STATE
+        entry_actions:
+          - restore_pre_loss_speed_limit
+        periodic_actions:
+          - follow_line
+          - publish_CAR_STATE
+        exit_actions:
+          - clear_line_loss_timer
+        timeout: line_lost_hold_ms
+        failure_transition: REACQUIRE
+      - from: REACQUIRE
+        event: LINE_RECOVERED
+        guards:
+          - line_valid
+          - confidence_above_threshold
+        to: PREVIOUS_TRACK_STATE
+        entry_actions:
+          - ramp_to_pre_loss_speed
+        periodic_actions:
+          - follow_line
+          - publish_CAR_STATE
+        exit_actions:
+          - clear_reacquire_timer
+        timeout: line_reacquire_max_ms
+        failure_transition: FAULT
+      - from: NORMAL_TRACK
+        event: A_FINISH
+        guards:
+          - path_mm >= finish_min_path_mm
+          - finish_cross_line_detected
+        to: FINISH_CONFIRM
+        entry_actions:
+          - start_finish_confirmation
+        periodic_actions:
+          - follow_line_at_reduced_speed
+          - publish_CAR_STATE
+        exit_actions:
+          - latch_lap_complete
+        timeout: 1000
+        failure_transition: NORMAL_TRACK
+      - from: FINISH_CONFIRM
+        event: FINISH_CONFIRMED
+        guards:
+          - finish_event_is_stable
+        to: DONE
+        entry_actions:
+          - ramp_speed_to_zero
+          - disable_motor_driver_when_stopped
+        periodic_actions:
+          - publish_CAR_STATE
+          - publish_CAR_POSE
+        exit_actions: []
+        timeout: 3000
+        failure_transition: FAULT
+
+communications:
+  topology:
+    logical_master: aircraft_controller
+    slaves:
+      - car_controller
+      - ground_station
+    radio_module: ECB02
+    preferred_physical_design:
+      aircraft_modules: 1
+      prerequisite: one_master_two_slave_concurrent_link_verified
+    fallback_physical_design:
+      aircraft_modules: 2
+      aircraft_uart_links: 2
+      mapping:
+        - aircraft_to_car
+        - aircraft_to_ground_station
+  messages:
+    TASK_START:
+      id: 0x10
+      source: car_controller
+      destinations:
+        - aircraft_controller
+      fields:
+        - {name: run_id, type: u8}
+        - {name: task_mode, type: u8}
+        - {name: normal_speed_mm_s, type: u16_le}
+        - {name: action_speed_mm_s, type: u16_le}
+    TASK_ABORT:
+      id: 0x11
+      source: ground_station
+      destinations:
+        - aircraft_controller
+        - car_controller
+      fields:
+        - {name: run_id, type: u8}
+        - {name: reason, type: u8}
+    TASK_STATE:
+      id: 0x12
+      source: aircraft_controller
+      destinations:
+        - car_controller
+        - ground_station
+      periodic: true
+      fields:
+        - {name: run_id, type: u8}
+        - {name: task_mode, type: u8}
+        - {name: global_state, type: u8}
+        - {name: result, type: u8}
+        - {name: fault_code, type: u16_le}
+        - {name: elapsed_ms, type: u32_le}
+        - {name: car_path_mm, type: u32_le}
+    CAR_STATE:
+      id: 0x31
+      source: car_controller
+      destinations:
+        - aircraft_controller
+        - ground_station
+      fields:
+        - {name: run_id, type: u8}
+        - {name: car_state, type: u8}
+        - {name: speed_mode, type: u8}
+        - {name: line_valid, type: u8}
+        - {name: speed_mm_s, type: u16_le}
+        - {name: fault_code, type: u16_le}
+        - {name: path_mm, type: u32_le}
+        - {name: lap, type: u8}
+    CAR_POSE:
+      id: 0x32
+      source: car_controller
+      destinations:
+        - aircraft_controller
+        - ground_station
+      fields:
+        - {name: run_id, type: u8}
+        - {name: x_mm, type: i16_le}
+        - {name: y_mm, type: i16_le}
+        - {name: heading_deg, type: i16_le}
+        - {name: path_mm, type: u32_le}
+    TRACK_EVENT:
+      id: 0x33
+      source: car_controller
+      destinations:
+        - aircraft_controller
+        - ground_station
+      fields:
+        - {name: run_id, type: u8}
+        - {name: event, type: u8}
+        - {name: path_mm, type: u32_le}
+    DROP_STATE:
+      id: 0x50
+      source: aircraft_controller
+      destinations:
+        - ground_station
+    LAND_STATE:
+      id: 0x51
+      source: aircraft_controller
+      destinations:
+        - ground_station
+    FAULT:
+      id: 0x60
+      source: any
+      destinations:
+        - aircraft_controller
+        - ground_station
+  routing:
+    - input: car_controller
+      output: ground_station
+      preserve_source_address: true
+    - input: aircraft_controller
+      output:
+        - car_controller
+        - ground_station
+    - input: ground_station
+      allowed_messages:
+        - TASK_ABORT
+        - QUERY
+      output: aircraft_controller
+      forward_abort_to_car: true
+
+timeouts:
+  line_lost_hold_ms: 120
+  line_reacquire_max_ms: 1000
+  action_slow_max_ms: 25000
+  aircraft_state_timeout_ms: 500
+  car_state_timeout_ms: 500
+  ground_station_offline_ms: 2000
+  task_state_period_ms: 100
+  car_state_period_ms: 100
+  car_pose_period_ms: 100
+  C_ENTER_period_ms: 100
+
+fault_policies:
+  CAR_VISION_SHORT_LOSS:
+    severity: warning
+    action: enter_LOST_HOLD
+  CAR_VISION_LONG_LOSS:
+    severity: error
+    action: enter_REACQUIRE_then_FAULT_on_timeout
+  AIRCRAFT_VISION_LOSS:
+    severity: warning
+    action: hold_height_and_continue_search_until_D
+  FLIGHT_CONTROLLER_TIMEOUT:
+    severity: error
+    action: stop_new_motion_commands_and_use_flight_controller_failsafe
+  GROUND_STATION_OFFLINE:
+    severity: info
+    action: continue_mission_and_mark_ground_station_offline
+  AIRCRAFT_CAR_LINK_LOSS_IN_ACTION_ZONE:
+    severity: warning
+    action: car_restores_normal_speed_at_D_or_action_timeout
+  ACTION_DEADLINE_MISSED:
+    severity: error
+    action: prohibit_action_and_transition_aircraft_to_RETURN
+  TASK_ABORT_RECEIVED:
+    severity: critical
+    action: aircraft_safe_land_and_car_immediate_stop
+
+invariants:
+  - aircraft_controller_is_only_global_state_owner
+  - aircraft_controller_is_bluetooth_routing_master
+  - ground_station_offline_does_not_interrupt_normal_mission
+  - car_enters_ACTION_SLOW_at_C_without_wireless_confirmation
+  - car_restores_normal_speed_after_DROP_or_RETAKEOFF_completion
+  - car_restores_normal_speed_at_D_or_action_timeout
+  - car_never_intentionally_stops_in_C_D_action_zone
+  - side_effect_messages_are_idempotent_by_run_id
+  - duplicate_C_ENTER_does_not_repeat_drop_or_landing
+  - TASK_STATE_is_periodic
+  - C_ENTER_is_periodic_while_in_action_zone
+  - drop_descent_takeoff_and_disarm_are_single_trigger_actions
+  - no_ACTION_WAIT_C_global_state_exists
+  - FOLLOW_waits_for_C_ENTER
+
+acceptance_tests:
+  - id: TRACK_DIRECTION_AND_ODOMETRY
+    expected: A_B_C_D_A_clockwise_mapping_matches_calibrated_track
+  - id: REACH_B_WITHIN_15_SECONDS
+    expected: B_CROSS_elapsed_ms <= point_b_deadline_ms
+  - id: AUTO_SLOW_AT_C
+    expected: car_state_changes_from_NORMAL_TRACK_to_ACTION_SLOW
+  - id: FOLLOW_TO_DROP
+    expected: DROP_mode_C_ENTER_changes_SEARCH_or_FOLLOW_to_DROP
+  - id: FOLLOW_TO_LAND_CAR
+    expected: DYNAMIC_LANDING_mode_C_ENTER_changes_SEARCH_or_FOLLOW_to_LAND_CAR
+  - id: DROP_RESUME_SPEED
+    expected: DROP_to_RETURN_causes_car_to_restore_normal_speed
+  - id: DYNAMIC_LANDING_SLOW_WINDOW
+    expected: car_remains_ACTION_SLOW_through_LAND_CAR_WAIT_5S_RETAKEOFF
+  - id: D_EXIT_FAILURE
+    expected: incomplete_action_is_cancelled_and_car_restores_normal_speed
+  - id: DUPLICATE_EVENT_IDEMPOTENCY
+    expected: duplicate_TASK_START_and_C_ENTER_do_not_repeat_side_effects
+  - id: GROUND_STATION_OFFLINE
+    expected: aircraft_and_car_continue_without_ground_station
+  - id: AIRCRAFT_CAR_LINK_LOSS
+    expected: car_does_not_remain_in_ACTION_SLOW_after_D_or_timeout
+  - id: ECB02_ONE_MASTER_TWO_SLAVES
+    expected: concurrent_links_work_or_dual_ECB02_fallback_is_used
+  - id: COMPLETE_WITHIN_90_SECONDS
+    expected: total_mission_elapsed_ms <= task_deadline_ms
