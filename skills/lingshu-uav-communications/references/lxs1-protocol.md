@@ -1,68 +1,59 @@
 # LXS1 AI 工作参考
 
-## 不可改变的协议常量
+权威定义是仓库根目录：
 
-- SOF：`AA 55`
-- EOF：`0D 0A`
-- `LEN = 3 + DATA长度`
-- 小端序
-- 最大数据：64字节
-- 帧：`SOF | LEN | SRC | DST | MSG | DATA | EOF`
-- 不使用版本、序号、时间戳、校验位、ACK、重试或CRC字段。
+- `LXS1_通信协议/LXS1_PROTOCOL.md`
+- `land_air_state_machine.yaml`
+- `飞行器联调通信对接汇报.md`
 
-节点：`0x01`凌霄适配端，`0x02`飞机F407，`0x03`天空K230，`0x04`小车F407，`0x05`小车K230，`0x06`地面站，`0xFF`广播。
+修改消息字段前必须读取以上文件，不得从旧KGS1/RTSP代码推断。
 
-## 设备职责
-
-| 设备 | 必须负责 | 不要让它负责 |
-|---|---|---|
-| 凌霄适配端 | 把语义飞行指令转换为原厂帧，回传飞控状态 | 不要假设原厂协议等同于LXS1 |
-| 飞机F407 | 任务状态机、视觉结果融合、飞行指令、抛投/动态降落时序 | 不要把任务状态机放在K230 |
-| 天空K230 | 识别小车、平台和目标，输出误差/置信度/有效期 | 不要输出电机控制量或重复旧目标 |
-| 小车F407 | 电机、循线控制、启动、速度、路径进度 | 不要由地面站实时手动遥控 |
-| 小车K230 | 黑线检测，输出横向误差/航向误差/曲率/丢线计数 | 不要修改小车任务状态 |
-| 地面站 | 监视、记录、查询、终止、故障显示 | 不要使用图传协议或测评时改代码 |
-
-## 消息号
+## 固定帧
 
 ```text
-01 HELLO             02 HEARTBEAT        03 ACK       04 NACK
-10 TASK_START        11 TASK_ABORT       12 TASK_STATE 13 RUN_RESULT
-20 FC_CMD            21 FC_STATE         22 FC_POSE
-30 CAR_CMD           31 CAR_STATE        32 CAR_POSE
-40 VISION_TARGET     41 VISION_LANDMARK  42 VISION_LINE 43 VISION_DIAG
-50 DROP_STATE        51 LAND_STATE       60 FAULT
+AA 55 | LEN | SRC | DST | MSG | DATA | 0D 0A
+LEN = 3 + DATA长度
 ```
 
-核心负载：
+- 小端序，DATA最大64字节，无CRC、ACK、序号和重试字段。
+- 节点：`01`飞控适配、`02`飞机主控、`03`天空K230、`04`小车主控、
+  `05`小车K230、`06`地面站、`FF`广播。
+
+## 当前关键消息
 
 ```text
-TASK_START:      task_mode:u8, run_id:u8, start_nonce:u16, car_speed_mm_s:u16
-VISION_TARGET:   valid:u8, target_kind:u8, confidence:u16, dx/dy/dz:i16,
-                 yaw:i16, age_ms:u16, flags:u16, reserved:u16
-VISION_LANDMARK: valid:u8, marker_kind:u8, confidence:u16,
-                 error_x/error_y/error_yaw:i16, scale:u16, flags:u16, reserved:u16
-VISION_LINE:     valid:u8, lost_count:u8, confidence:u16,
-                 lateral_error:i16, heading_error:i16, curvature:i16, reserved:u16
+10 TASK_START      小车→飞机/地面站，6字节
+11 TASK_ABORT      飞机/地面站→广播
+12 TASK_STATE      飞机→小车/地面站，14字节，100 ms
+31 CAR_STATE       小车→飞机/地面站，13字节，100 ms
+32 CAR_POSE        小车→飞机/地面站，11字节，100 ms
+33 TRACK_EVENT     小车→飞机/地面站，6字节
+34 CAR_DIAGNOSTIC  小车→地面站，52字节
+40 VISION_TARGET   天空K230→飞机，12字节
+41 VISION_LANDMARK 天空K230→飞机，10字节
+42 VISION_LINE     小车K230→小车，11字节
+50 DROP_STATE      飞机→地面站
+51 LAND_STATE      飞机→地面站
+60 FAULT           任意→对应主控/地面站
 ```
 
-飞机任务状态：`IDLE → TAKEOFF → HOVER_3S → SEARCH → FOLLOW → DROP/LAND_CAR → WAIT_5S → RETURN → LAND_H → DONE`；异常进入 `ABORT`。
+不要改变：
 
-## 时序与安全
+```text
+TASK_START = run_id:u8, task_mode:u8, normal_speed:u16, action_speed:u16
+TRACK_EVENT = run_id:u8, event:u8, path_mm:u32
+VISION_TARGET = valid:u8, kind:u8, confidence:u16, dx/dy/dz/yaw:i16
+VISION_LANDMARK = valid:u8, kind:u8, confidence:u16, error_x/error_y/error_yaw:i16
+```
 
-- 视觉目标超过300 ms无更新，置无效；不要无限保持旧目标。
-- 飞控状态/指令超过300 ms无更新，进入悬停或安全返航。
-- 小车视觉超过100 ms无更新，保持短时控制；超过500 ms关闭电机并报错。
-- 心跳1 Hz；视觉最高20 Hz；飞行状态20 Hz；小车状态10 Hz。
-- 副作用命令使用 `run_id` 幂等；不要通过重试重复触发起飞、抛投或降落。
-- STM32使用DMA+IDLE接收，ISR只做搬运/置标志；主循环做解析和分发；禁止动态内存、阻塞、延时和中断内打印。
+全局状态为0～13，`RETURN=9`；事件为 `B=1,C=2,D=3,A=4`。
 
-## 现有工程落地位置
+## 当前安全规则
 
-- 规范：`LXS1_通信协议/LXS1_PROTOCOL.md`
-- STM32头文件：`LXS1_通信协议/include/lxs1_protocol.h`
-- STM32实现：`LXS1_通信协议/src/lxs1_protocol.c`
-- Python/K230参考：`LXS1_通信协议/python/lxs1.py`
-- 测试：`LXS1_通信协议/tests/test_lxs1.py`
-
-原 KGS1/RTSP 图传和 `AA FF F1` 旧检测串口格式不属于本协议。
+- 天空视觉超过300 ms无更新时无效。
+- 小车K230链路超过180 ms无更新时停止；内容无效时最长3秒低速重捕获。
+- 飞控状态超过500 ms无更新时进入安全策略。
+- 地面站离线2秒只影响显示，不中断任务。
+- 所有副作用按 `run_id`幂等，`TASK_STATE`和C区间 `C_ENTER`必须周期发送。
+- ECB02仅点对点：飞机、小车、地面站各两块，共三条无线链路。
+- 视觉节点只输出测量，不能直接控制飞控、电机、投放器或状态机。

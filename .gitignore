@@ -1,7 +1,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+build/
 *.o
 *.elf
 *.bin
 *.hex
+!Car/STM32/CarF407/firmware/CarF407.elf

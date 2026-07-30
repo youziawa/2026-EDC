@@ -1,0 +1,11 @@
+# 小车STM32固件
+
+`CarF407.elf`由本仓库 `Car/STM32/CarF407` 的Debug预设构建。
+
+```text
+SHA256: 18FFA9D80BD68D39F813369E59C555984B3386F169A315C733B4B798ADE579FB
+FLASH:  36728 bytes
+RAM:    4864 bytes
+```
+
+烧录目标：STM32F407VET6。OpenOCD配置见上级目录 `lckfb-skystar.cfg`。

@@ -43,6 +43,8 @@ class VisionResult:
 
         # 本地调试字段，不进入 LXS1 数据区。
         self.raw_valid_strips = 0
+        self.marker_detected = 0
+        self.marker_strips = 0
         self.threshold = cfg.FIXED_THRESHOLD
 
 
@@ -65,6 +67,9 @@ class LineDetector:
         self.filtered_lateral = 0.0
         self.filtered_heading = 0.0
         self.filtered_curvature = 0.0
+        self.marker_active = False
+        self.marker_on_streak = 0
+        self.marker_off_streak = 0
         self.result = VisionResult()
 
         top = min(cfg.STRIP_CENTER_Y) - cfg.STRIP_HEIGHT // 2
@@ -91,6 +96,28 @@ class LineDetector:
             self.thresholds = [(0, int(self.threshold))]
         except Exception:
             # 部分旧固件不支持 bins 参数，失败时保持上一次阈值。
+            pass
+
+    def _prepare_binary(self, image):
+        """显式二值化并做轻量形态学去噪；不支持时安全退回原图阈值检测。"""
+        if not cfg.BINARY_PREPROCESS_ENABLED:
+            return
+
+        try:
+            # invert=True使阈值内的暗色赛道保持为0，背景为255；后续仍按
+            # (0, threshold)搜索黑线，避免二值化后前景/背景语义翻转。
+            image.binary(self.thresholds, invert=True)
+        except Exception:
+            return
+
+        # 黑线在二值图中为0。dilate先缩小孤立黑噪点，erode再恢复主线宽度。
+        try:
+            for _ in range(cfg.BINARY_DILATE_ITERATIONS):
+                image.dilate(1)
+            for _ in range(cfg.BINARY_ERODE_ITERATIONS):
+                image.erode(1)
+        except Exception:
+            # 已完成二值化时，即使形态学API不可用也可继续识别。
             pass
 
     def _search_roi(self, strip_index):
@@ -123,15 +150,27 @@ class LineDetector:
         for blob in blobs:
             width = blob.w()
             height = blob.h()
-            if width < cfg.MIN_LINE_WIDTH or width > cfg.MAX_LINE_WIDTH:
+            if width < cfg.MIN_LINE_WIDTH or width > cfg.MAX_MARKER_WIDTH:
                 continue
             if height > cfg.MAX_LINE_HEIGHT:
                 continue
 
+            is_marker = width >= cfg.MARKER_MIN_WIDTH
+            if is_marker:
+                # 宽连通域只在已有轨迹预测时接受；圆点中心必须靠近预计线位。
+                if (not self.have_filter) or (not tracking):
+                    continue
+                if abs(blob.cx() - expected_x) > cfg.MARKER_MAX_CENTER_DEVIATION:
+                    continue
+
             score = blob.pixels() * 4
             if tracking:
                 score -= abs(blob.cx() - expected_x) * cfg.POSITION_PENALTY
-                score -= abs(width - expected_width) * cfg.WIDTH_PENALTY
+                if not is_marker:
+                    score -= abs(width - expected_width) * cfg.WIDTH_PENALTY
+                else:
+                    # 降低大面积的天然得分优势，优先选择同位置的正常线段。
+                    score -= (width - cfg.MARKER_MIN_WIDTH) * 3
 
             if score > best_score:
                 best_score = score
@@ -139,8 +178,27 @@ class LineDetector:
 
         return best
 
+    def _has_marker_candidate(self, blobs, strip_index):
+        """Detect a dot independently from the blob selected for steering."""
+        tracking = self.valid_streak > 0 or self.lost_count < 3
+        if (not self.have_filter) or (not tracking):
+            return False
+
+        expected_x = self.last_x[strip_index]
+        for blob in blobs:
+            width = blob.w()
+            if width < cfg.MARKER_MIN_WIDTH or width > cfg.MAX_MARKER_WIDTH:
+                continue
+            if blob.h() > cfg.MAX_LINE_HEIGHT:
+                continue
+            if abs(blob.cx() - expected_x) > cfg.MARKER_MAX_CENTER_DEVIATION:
+                continue
+            return True
+        return False
+
     def _find_points(self, image):
         valid_count = 0
+        marker_count = 0
         density_sum = 0.0
 
         for index in range(self.count):
@@ -159,6 +217,9 @@ class LineDetector:
             except Exception:
                 blobs = ()
 
+            if self._has_marker_candidate(blobs, index):
+                marker_count += 1
+
             blob = self._best_blob(blobs, index)
             if blob is None:
                 self.point_valid[index] = False
@@ -167,11 +228,14 @@ class LineDetector:
             x = float(blob.cx())
             y = float(blob.cy())
             width = float(blob.w())
+            is_marker = width >= cfg.MARKER_MIN_WIDTH
             self.x_points[index] = x
             self.y_points[index] = y
             self.point_valid[index] = True
             self.last_x[index] = x
-            self.last_width[index] = width
+            # 通过圆点后仍沿用进入圆点前的普通线宽，避免搜索器在圆点出口抖动。
+            if not is_marker:
+                self.last_width[index] = width
             valid_count += 1
 
             roi_area = max(1, roi[2] * roi[3])
@@ -185,7 +249,7 @@ class LineDetector:
                     pass
 
         density_quality = density_sum / valid_count if valid_count else 0.0
-        return valid_count, density_quality
+        return valid_count, density_quality, marker_count
 
     def _geometry(self, valid_count):
         # 对 x = intercept + slope * forward_pixel 做最小二乘拟合。
@@ -322,13 +386,39 @@ class LineDetector:
         result.heading_error_deg = 0
         result.curvature = 0
 
+    def _update_marker(self, marker_count):
+        """对圆点识别做空间确认和开关迟滞，输出稳定的物理圆点占用状态。"""
+        if self.marker_active:
+            if marker_count >= cfg.MARKER_HOLD_MIN_STRIPS:
+                self.marker_off_streak = 0
+            else:
+                self.marker_off_streak += 1
+                if self.marker_off_streak >= cfg.MARKER_OFF_CONFIRM_FRAMES:
+                    self.marker_active = False
+                    self.marker_on_streak = 0
+                    self.marker_off_streak = 0
+        else:
+            if marker_count >= cfg.MARKER_MIN_STRIPS:
+                self.marker_on_streak += 1
+                if self.marker_on_streak >= cfg.MARKER_ON_CONFIRM_FRAMES:
+                    self.marker_active = True
+                    self.marker_on_streak = 0
+                    self.marker_off_streak = 0
+            else:
+                self.marker_on_streak = 0
+
+        return 1 if self.marker_active else 0
+
     def process(self, image):
         self.frame_index += 1
         self._update_threshold(image)
-        valid_count, density_quality = self._find_points(image)
+        self._prepare_binary(image)
+        valid_count, density_quality, marker_count = self._find_points(image)
 
         result = self.result
         result.raw_valid_strips = valid_count
+        result.marker_strips = marker_count
+        result.marker_detected = self._update_marker(marker_count)
         result.threshold = int(self.threshold)
 
         if valid_count < cfg.MIN_VALID_STRIPS:
@@ -426,12 +516,14 @@ class LineDetector:
             image.draw_string(
                 int(2 * scale_x),
                 int(1 * scale_y),
-                "%s C:%d T:%d N:%d"
+                "%s C:%d T:%d N:%d M:%d D:%d"
                 % (
                     state,
                     result.confidence,
                     result.threshold,
                     result.raw_valid_strips,
+                    result.marker_strips,
+                    result.marker_detected,
                 ),
                 color=(255, 255, 255),
                 scale=text_scale,

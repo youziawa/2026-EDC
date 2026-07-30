@@ -44,6 +44,12 @@ THRESHOLD_OFFSET = -4
 THRESHOLD_UPDATE_FRAMES = 5
 THRESHOLD_FILTER_ALPHA = 0.30
 
+# Otsu阈值更新后显式生成黑白图，再清除小面积黑噪点并恢复主线宽度。
+# CanMV固件若不支持binary/dilate/erode，算法会自动退回直接阈值find_blobs。
+BINARY_PREPROCESS_ENABLED = True
+BINARY_DILATE_ITERATIONS = 1
+BINARY_ERODE_ITERATIONS = 1
+
 # find_blobs 参数。黑线太细时可适当降低，噪点多时适当提高。
 X_STRIDE = 2
 Y_STRIDE = 2
@@ -53,6 +59,21 @@ MIN_LINE_WIDTH = 3
 MAX_LINE_WIDTH = 120
 MAX_LINE_HEIGHT = STRIP_HEIGHT
 MERGE_MARGIN = 2
+
+# A/B/C/D处是大黑圆点。圆点进入水平ROI后会形成比普通赛道线更宽的连通域，
+# 不能按“线宽超限”直接丢弃。宽连通域只在已经跟踪到赛道、且中心仍靠近上一
+# 位置时作为赛道标记接受，避免全屏搜索时把场地边框或阴影当作圆点。
+MAX_MARKER_WIDTH = 210
+MARKER_MIN_WIDTH = 70
+MARKER_MAX_CENTER_DEVIATION = 72
+# 圆点在远端或经过形态学去噪后可能暂时只覆盖一条采样带；使用连续2帧确认
+# 抑制瞬时噪点，不再强制要求同一帧覆盖两条采样带，以免漏掉某个真实点位。
+MARKER_MIN_STRIPS = 1
+# 圆点已经确认后，仍有一条采样带保持宽区域就继续保持“在圆点上”。
+MARKER_HOLD_MIN_STRIPS = 1
+MARKER_ON_CONFIRM_FRAMES = 2
+# 圆点离开使用更长迟滞，避免大圆点内部被阈值波动切成多个事件。
+MARKER_OFF_CONFIRM_FRAMES = 8
 
 # 候选区域距离上一次位置越远，得分越低。
 POSITION_PENALTY = 2
