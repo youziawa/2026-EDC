@@ -280,6 +280,18 @@ marker_fresh, motor_standby, direction_forward, motor_start_delay
 10..11 battery_mv:u16      12 fault:u8
 ```
 
+### FC_POSE `0x22`，8字节
+
+```text
+0..1 x_cm:i16
+2..3 y_cm:i16
+4..5 z_cm:i16
+6..7 yaw_deg:i16
+```
+
+场地坐标原点为左下角，X向右、Y向上、Z为离地高度。该字段用于地面站态势
+显示，不替代飞机内部导航坐标；飞机主控负责从内部NED/ENU坐标转换。
+
 ### DROP_STATE `0x50`
 
 ```text

@@ -6,6 +6,8 @@
 ## 对接人员先看
 
 - [飞行器联调通信对接汇报](飞行器联调通信对接汇报.md)
+- [地面站对接说明](GroundStation/对接说明.md)
+- [给队友AI的任务书](GroundStation/给队友AI的任务书.md)
 - [LXS1通信协议](LXS1_通信协议/LXS1_PROTOCOL.md)
 - [统一状态机（队员版）](陆空协同统一状态机.md)
 - [统一状态机（AI/YAML版）](land_air_state_machine.yaml)
@@ -20,6 +22,7 @@ Car/
   Hardware/            接线、PCB、BOM和Gerber
 GroundStation/
   Hardware/            地面站硬件工程
+  Software/            Windows/Ubuntu图形化地面站
 LXS1_通信协议/          C/Python协议库、测试和诊断工具
 skills/                AI通信协议辅助资料
 ```
@@ -65,11 +68,14 @@ Car/K230/lxs1_uart.py
 ```powershell
 python -B -m unittest discover -s Car\K230\tests -v
 python -B -m unittest discover -s LXS1_通信协议\tests -v
+python -B -m unittest discover -s GroundStation\Software\tests -t GroundStation\Software -v
 ```
 
 ## 当前限制
 
-- 正式PyQt地面站尚未实现，当前电脑端可用
-  `LXS1_通信协议/python/car_diagnostic_monitor.py`诊断小车。
+- 图形化地面站已实现，支持LXS1 v1.1、小车里程地图定位、任务状态、日志、
+  `TASK_ABORT`和无硬件演示。入口为 `GroundStation/Software/main.py`。
+- 地面站GUI当前接收单个串口字节流；正式双链路需要地面站F103把飞机和小车
+  两路ECB02原始LXS1帧汇聚到一个PC串口，或后续扩展GUI同时打开两个COM口。
 - 飞机主控、凌霄飞控适配层和天空端K230代码由对应负责人对接实现。
 - ECB02为点对点链路，飞机、小车、地面站各需要两块模块。
