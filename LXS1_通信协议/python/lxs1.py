@@ -83,6 +83,8 @@ MSG_FC_POSE = 0x22
 MSG_CAR_CMD = 0x30
 MSG_CAR_STATE = 0x31
 MSG_CAR_POSE = 0x32
+MSG_TRACK_EVENT = 0x33
+MSG_CAR_DIAGNOSTIC = 0x34
 MSG_VISION_TARGET = 0x40
 MSG_VISION_LANDMARK = 0x41
 MSG_VISION_LINE = 0x42
@@ -92,8 +94,80 @@ MSG_LAND_STATE = 0x51
 MSG_FAULT = 0x60
 
 
-def pack_task_start(task_mode: int, run_id: int, car_speed_mm_s: int) -> bytes:
-    return struct.pack("<BBH", task_mode, run_id, car_speed_mm_s)
+def pack_task_start(
+    run_id: int,
+    task_mode: int,
+    normal_speed_mm_s: int,
+    action_speed_mm_s: int,
+) -> bytes:
+    return struct.pack(
+        "<BBHH",
+        run_id,
+        task_mode,
+        normal_speed_mm_s,
+        action_speed_mm_s,
+    )
+
+
+def pack_task_state(
+    run_id: int,
+    task_mode: int,
+    global_state: int,
+    result: int,
+    fault_code: int,
+    elapsed_ms: int,
+    car_path_mm: int,
+) -> bytes:
+    return struct.pack(
+        "<BBBBHII",
+        run_id,
+        task_mode,
+        global_state,
+        result,
+        fault_code,
+        elapsed_ms,
+        car_path_mm,
+    )
+
+
+def pack_vision_target(
+    valid: int,
+    target_kind: int,
+    confidence_permille: int,
+    dx_cm: int,
+    dy_cm: int,
+    dz_cm: int,
+    yaw_error_deg: int,
+) -> bytes:
+    return struct.pack(
+        "<BBHhhhh",
+        1 if valid else 0,
+        target_kind,
+        confidence_permille,
+        dx_cm if valid else 0,
+        dy_cm if valid else 0,
+        dz_cm if valid else 0,
+        yaw_error_deg if valid else 0,
+    )
+
+
+def pack_vision_landmark(
+    valid: int,
+    marker_kind: int,
+    confidence_permille: int,
+    error_x_cm: int,
+    error_y_cm: int,
+    error_yaw_deg: int,
+) -> bytes:
+    return struct.pack(
+        "<BBHhhh",
+        1 if valid else 0,
+        marker_kind,
+        confidence_permille,
+        error_x_cm if valid else 0,
+        error_y_cm if valid else 0,
+        error_yaw_deg if valid else 0,
+    )
 
 
 def pack_vision_line(
@@ -103,14 +177,15 @@ def pack_vision_line(
     lateral_error_mm: int,
     heading_error_deg: int,
     curvature: int,
+    marker_detected: int = 0,
 ) -> bytes:
     return struct.pack(
-        "<BBHhhhH",
+        "<BBHhhhB",
         valid,
         lost_count,
         confidence_permille,
         lateral_error_mm,
         heading_error_deg,
         curvature,
-        0,
+        1 if marker_detected else 0,
     )

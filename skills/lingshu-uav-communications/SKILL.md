@@ -41,13 +41,13 @@ The canonical project specification is `LXS1_通信协议/LXS1_PROTOCOL.md`; reu
 - `LEN = 3 + DATA长度`，统计 `SRC、DST、MSG、DATA`；最大数据长度64字节。
 - 不使用版本、序号、时间戳、校验位、ACK、重试或CRC字段。
 - Unknown messages may be dropped after parser resynchronization.
-- Send vision at up to 20 Hz, flight state at 20 Hz, car state at 10 Hz, heartbeat at 1 Hz, and ground UI refresh at least 5 Hz.
-- Treat vision as invalid after 300 ms, flight command/state as stale after 300 ms, car line input as stale after 100 ms, and ground-station telemetry as offline after 2 s.
+- Send sky vision at 10–20 Hz, car vision at 40 Hz, `TASK_STATE` and car telemetry at 10 Hz, heartbeat at 1 Hz, and ground UI refresh at least 5 Hz.
+- Treat sky vision as invalid after 300 ms, flight state as stale after 500 ms, car K230 transport as stale after 180 ms, and ground-station telemetry as offline after 2 s.
 
 ## Testing checklist
 
-- Run Python parser tests for round-trip, fragmented frames, coalesced frames, bad CRC, and resynchronization.
-- Connect each UART with a logic analyzer or USB-UART and verify baud, byte order, frame length, CRC, and sequence increments.
+- Run Python parser tests for round-trip, fragmented frames, coalesced frames, bad frame tails, payload layouts, and resynchronization.
+- Connect each UART with a logic analyzer or USB-UART and verify baud, byte order, frame length, source/destination, message ID, and fixed frame tail.
 - Test duplicate `TASK_START` and duplicate action commands; confirm they do not trigger duplicate takeoff, drop, landing, or motor start.
 - Unplug K230, flight controller, car controller, and radio one at a time. Confirm safe behavior and a visible fault code.
 - Log real test values for B-point time, D-point time, height, platform dwell time, lap time, and task result for the design report.

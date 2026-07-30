@@ -25,8 +25,8 @@ devices:
     address: 0x02
     responsibilities:
       - own_global_state
-      - act_as_bluetooth_master
-      - route_car_telemetry_to_ground_station
+      - maintain_direct_car_link
+      - maintain_direct_ground_station_link
       - control_flight_controller
       - execute_drop_or_dynamic_landing
       - return_and_land_at_H
@@ -50,7 +50,7 @@ devices:
     responsibilities:
       - detect_black_line
       - publish_line_error
-      - detect_finish_cross_line
+      - detect_finish_track_dot
   ground_station:
     address: 0x06
     implementation: PyQt
@@ -155,24 +155,48 @@ track_events:
     trigger: path_mm >= point_b_path_mm
   C_ENTER:
     code: 2
-    trigger: path_mm >= point_c_path_mm and path_mm < point_d_path_mm
+    trigger: point_c_path_mm <= path_mm < point_d_path_mm
     repeat_while_active: true
   D_EXIT:
     code: 3
     trigger: path_mm >= point_d_path_mm
   A_FINISH:
     code: 4
-    trigger: path_mm >= finish_min_path_mm and finish_cross_line_detected
+    trigger: path_mm >= lap_path_mm
 
 parameters:
   normal_speed_mm_s: 150
   action_speed_mm_s: 80
   reacquire_speed_mm_s: 40
+  starting_search_speed_mm_s: 40
+  starting_search_timeout_ms: 3000
+  start_safety_delay_ms: 10000
+  wheel_diameter_mm: 47
+  wheel_track_mm: 432
+  left_counts_per_rev: 41589
+  right_counts_per_rev: 41348
+  odometry_calibration: 1.05187
   point_b_path_mm: 1500
   point_c_path_mm: 3856
   point_d_path_mm: 5356
   lap_path_mm: 7712
-  finish_min_path_mm: 7300
+  vision_binary_preprocess_enabled: true
+  vision_binary_dilate_iterations: 1
+  vision_binary_erode_iterations: 1
+  vision_marker_min_strips: 1
+  vision_marker_min_width_px: 70
+  vision_marker_hold_min_strips: 1
+  vision_marker_on_confirm_frames: 2
+  vision_marker_off_confirm_frames: 8
+  line_lateral_kp_pps_per_mm: 130
+  line_heading_kp_pps_per_deg: 220
+  line_lateral_deadband_mm: 3
+  line_heading_deadband_deg: 1
+  line_curvature_deadband: 120
+  line_curvature_weight_percent: 35
+  line_max_correction_pps: 15000
+  line_correction_filter_divisor: 6
+  line_correction_max_step_pps: 2200
   target_height_cm: 150
   target_height_tolerance_cm: 10
   hover_required_ms: 3000
@@ -491,6 +515,21 @@ state_machines:
         guards:
           - button_debounced
           - car_self_test_passed
+        to: READY
+        entry_actions:
+          - latch_start_countdown
+          - keep_motor_disabled
+        periodic_actions:
+          - keep_motor_disabled
+        exit_actions: []
+        timeout: start_safety_delay_ms
+        failure_transition: READY
+      - from: READY
+        event: START_SAFETY_DELAY_ELAPSED
+        guards:
+          - start_countdown_latched
+          - elapsed_ms >= start_safety_delay_ms
+          - car_self_test_passed
         to: STARTING
         entry_actions:
           - increment_run_id
@@ -503,26 +542,26 @@ state_machines:
         timeout: 1000
         failure_transition: FAULT
       - from: STARTING
-        event: START_INITIALIZATION_COMPLETE
+        event: LINE_ACQUIRED
         guards:
-          - vision_link_available
+          - fresh_valid_line_available
           - motor_controller_ready
         to: NORMAL_TRACK
         entry_actions:
           - ramp_to_normal_speed
         periodic_actions:
-          - follow_line
+          - drive_straight_at_starting_search_speed
+          - search_for_normal_track_line
           - publish_CAR_STATE
           - publish_CAR_POSE
         exit_actions:
           - retain_line_controller_state
-        timeout: 2000
+        timeout: starting_search_timeout_ms
         failure_transition: FAULT
       - from: NORMAL_TRACK
         event: C_ENTER
         guards:
-          - path_mm >= point_c_path_mm
-          - path_mm < point_d_path_mm
+          - point_c_path_mm <= path_mm < point_d_path_mm
         to: ACTION_SLOW
         entry_actions:
           - ramp_to_action_speed
@@ -614,55 +653,54 @@ state_machines:
       - from: NORMAL_TRACK
         event: A_FINISH
         guards:
-          - path_mm >= finish_min_path_mm
-          - finish_cross_line_detected
+          - path_mm >= lap_path_mm
         to: FINISH_CONFIRM
         entry_actions:
+          - disable_line_follow
+          - emergency_stop_motor_driver
           - start_finish_confirmation
         periodic_actions:
-          - follow_line_at_reduced_speed
           - publish_CAR_STATE
+          - publish_CAR_POSE
         exit_actions:
           - latch_lap_complete
-        timeout: 1000
-        failure_transition: NORMAL_TRACK
+        timeout: 300
+        failure_transition: DONE
       - from: FINISH_CONFIRM
         event: FINISH_CONFIRMED
         guards:
-          - finish_event_is_stable
+          - finish_confirmation_elapsed_ms >= 300
         to: DONE
         entry_actions:
-          - ramp_speed_to_zero
-          - disable_motor_driver_when_stopped
+          - keep_motor_driver_disabled
         periodic_actions:
           - publish_CAR_STATE
           - publish_CAR_POSE
         exit_actions: []
-        timeout: 3000
+        timeout: 300
         failure_transition: FAULT
 
 communications:
   topology:
-    logical_master: aircraft_controller
-    slaves:
-      - car_controller
-      - ground_station
+    type: three_point_to_point_links
     radio_module: ECB02
-    preferred_physical_design:
-      aircraft_modules: 1
-      prerequisite: one_master_two_slave_concurrent_link_verified
-    fallback_physical_design:
-      aircraft_modules: 2
-      aircraft_uart_links: 2
-      mapping:
-        - aircraft_to_car
-        - aircraft_to_ground_station
+    modules_per_device: 2
+    total_modules: 6
+    links:
+      - {endpoints: [aircraft_controller, car_controller], mode: point_to_point}
+      - {endpoints: [aircraft_controller, ground_station], mode: point_to_point}
+      - {endpoints: [car_controller, ground_station], mode: point_to_point}
+    car_uart_mapping:
+      USART2: aircraft_controller
+      USART1: ground_station
+      USART3: car_k230
   messages:
     TASK_START:
       id: 0x10
       source: car_controller
       destinations:
         - aircraft_controller
+        - ground_station
       fields:
         - {name: run_id, type: u8}
         - {name: task_mode, type: u8}
@@ -729,6 +767,34 @@ communications:
         - {name: run_id, type: u8}
         - {name: event, type: u8}
         - {name: path_mm, type: u32_le}
+    CAR_DIAGNOSTIC:
+      id: 0x34
+      source: car_controller
+      destinations:
+        - ground_station
+      periodic: true
+      period_ms: 100
+      data_length: 52
+      fields:
+        - {name: run_id, type: u8}
+        - {name: car_state, type: u8}
+        - {name: line_state, type: u8}
+        - {name: flags, type: u8, bits: [key_raw, key_debounced, k230_received, k230_fresh_valid, marker_fresh, motor_standby, direction_forward, motor_start_delay]}
+        - {name: fault_code, type: u16_le}
+        - {name: left_requested_pps, type: i32_le}
+        - {name: right_requested_pps, type: i32_le}
+        - {name: left_target_pps, type: i32_le}
+        - {name: right_target_pps, type: i32_le}
+        - {name: left_speed_pps, type: i32_le}
+        - {name: right_speed_pps, type: i32_le}
+        - {name: left_pwm_permille, type: i16_le}
+        - {name: right_pwm_permille, type: i16_le}
+        - {name: left_total_counts, type: i32_le}
+        - {name: right_total_counts, type: i32_le}
+        - {name: k230_age_ms, type: u16_le}
+        - {name: k230_frame_count_low16, type: u16_le}
+        - {name: k230_malformed_count_low16, type: u16_le}
+        - {name: path_mm, type: u32_le}
     DROP_STATE:
       id: 0x50
       source: aircraft_controller
@@ -746,23 +812,17 @@ communications:
         - aircraft_controller
         - ground_station
   routing:
-    - input: car_controller
-      output: ground_station
-      preserve_source_address: true
-    - input: aircraft_controller
-      output:
-        - car_controller
-        - ground_station
-    - input: ground_station
-      allowed_messages:
-        - TASK_ABORT
-        - QUERY
-      output: aircraft_controller
-      forward_abort_to_car: true
+    - source: car_controller
+      direct_outputs: [aircraft_controller, ground_station]
+    - source: aircraft_controller
+      direct_outputs: [car_controller, ground_station]
+    - source: ground_station
+      allowed_messages: [TASK_ABORT, QUERY]
+      direct_outputs: [aircraft_controller, car_controller]
 
 timeouts:
   line_lost_hold_ms: 120
-  line_reacquire_max_ms: 1000
+  line_reacquire_max_ms: 3000
   action_slow_max_ms: 25000
   aircraft_state_timeout_ms: 500
   car_state_timeout_ms: 500
@@ -770,6 +830,7 @@ timeouts:
   task_state_period_ms: 100
   car_state_period_ms: 100
   car_pose_period_ms: 100
+  car_diagnostic_period_ms: 100
   C_ENTER_period_ms: 100
 
 fault_policies:
@@ -800,7 +861,8 @@ fault_policies:
 
 invariants:
   - aircraft_controller_is_only_global_state_owner
-  - aircraft_controller_is_bluetooth_routing_master
+  - every_device_uses_two_bluetooth_modules
+  - no_device_is_required_to_route_for_normal_operation
   - ground_station_offline_does_not_interrupt_normal_mission
   - car_enters_ACTION_SLOW_at_C_without_wireless_confirmation
   - car_restores_normal_speed_after_DROP_or_RETAKEOFF_completion
@@ -808,6 +870,14 @@ invariants:
   - car_never_intentionally_stops_in_C_D_action_zone
   - side_effect_messages_are_idempotent_by_run_id
   - duplicate_C_ENTER_does_not_repeat_drop_or_landing
+  - odometry_path_mm_is_the_primary_source_for_B_C_D_A_track_events
+  - path_mm_is_reset_to_zero_when_the_delayed_mission_run_begins
+  - C_D_action_slow_is_active_for_point_c_path_mm_to_point_d_path_mm
+  - A_FINISH_occurs_when_path_mm_reaches_lap_path_mm
+  - K230_marker_detected_is_diagnostic_only_and_cannot_advance_mission_events
+  - mission_start_does_not_require_A_marker_or_cross_line_visible
+  - motors_remain_disabled_for_start_safety_delay_ms_after_button_latch
+  - starting_blind_travel_is_limited_to_starting_search_timeout_ms
   - TASK_STATE_is_periodic
   - C_ENTER_is_periodic_while_in_action_zone
   - drop_descent_takeoff_and_disarm_are_single_trigger_actions
@@ -815,12 +885,30 @@ invariants:
   - FOLLOW_waits_for_C_ENTER
 
 acceptance_tests:
-  - id: TRACK_DIRECTION_AND_ODOMETRY
-    expected: A_B_C_D_A_clockwise_mapping_matches_calibrated_track
+  - id: START_SAFETY_DELAY
+    expected: motors_remain_disabled_for_10000_ms_after_button_latch
+  - id: MAP_PATH_FINISH
+    expected: path_mm_reaching_7712_causes_immediate_A_FINISH
+  - id: MARKER_CANNOT_ADVANCE_MISSION
+    expected: any_marker_detected_sequence_without_required_path_mm_cannot_change_B_C_D_A_events
+  - id: MARKER_TEMPORAL_CONFIRMATION
+    expected: one_frame_wide_sampling_strip_cannot_assert_marker_detected
+  - id: MARKER_VALID_INDEPENDENCE
+    expected: marker_detected_remains_available_for_diagnostics_when_line_valid_is_zero
+  - id: MARKER_CANDIDATE_INDEPENDENCE
+    expected: a_wide_dot_candidate_is_detected_even_when_a_narrow_line_blob_wins_the_steering_score
+  - id: STRAIGHT_LINE_STABILITY
+    expected: small_lateral_heading_and_curvature_noise_stays_inside_deadband_and_correction_step_limit
+  - id: MARKER_DROPOUT_HYSTERESIS
+    expected: fewer_than_8_clear_K230_frames_cannot_split_one_physical_dot
+  - id: BINARY_PREPROCESS_FALLBACK
+    expected: unsupported_binary_or_morphology_API_falls_back_without_crashing_vision
+  - id: MAP_SECTION_BOUNDARIES
+    expected: B_CROSS_at_1500_C_ENTER_at_3856_D_EXIT_at_5356_A_FINISH_at_7712
   - id: REACH_B_WITHIN_15_SECONDS
     expected: B_CROSS_elapsed_ms <= point_b_deadline_ms
   - id: AUTO_SLOW_AT_C
-    expected: car_state_changes_from_NORMAL_TRACK_to_ACTION_SLOW
+    expected: path_mm_reaching_3856_changes_car_state_from_NORMAL_TRACK_to_ACTION_SLOW
   - id: FOLLOW_TO_DROP
     expected: DROP_mode_C_ENTER_changes_SEARCH_or_FOLLOW_to_DROP
   - id: FOLLOW_TO_LAND_CAR
@@ -837,7 +925,7 @@ acceptance_tests:
     expected: aircraft_and_car_continue_without_ground_station
   - id: AIRCRAFT_CAR_LINK_LOSS
     expected: car_does_not_remain_in_ACTION_SLOW_after_D_or_timeout
-  - id: ECB02_ONE_MASTER_TWO_SLAVES
-    expected: concurrent_links_work_or_dual_ECB02_fallback_is_used
+  - id: ECB02_THREE_POINT_TO_POINT_LINKS
+    expected: all_three_direct_links_work_with_two_modules_per_device
   - id: COMPLETE_WITHIN_90_SECONDS
     expected: total_mission_elapsed_ms <= task_deadline_ms

@@ -242,12 +242,14 @@ def run():
                 measured_fps = diag_frame_count * 1000.0 / elapsed
                 if cfg.DEBUG_PRINT:
                     print(
-                        "fps=%.1f th=%d strips=%d valid=%d conf=%d "
-                        "lat=%d head=%d curv=%d txerr=%d"
+                        "fps=%.1f th=%d strips=%d marker=%d/%d "
+                        "valid=%d conf=%d lat=%d head=%d curv=%d txerr=%d"
                         % (
                             measured_fps,
                             result.threshold,
                             result.raw_valid_strips,
+                            result.marker_strips,
+                            result.marker_detected,
                             result.valid,
                             result.confidence,
                             result.lateral_error_mm,
