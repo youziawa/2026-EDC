@@ -29,8 +29,8 @@ LEN = 3 + DATA长度
 32 CAR_POSE        小车→飞机/地面站，11字节，100 ms
 33 TRACK_EVENT     小车→飞机/地面站，6字节
 34 CAR_DIAGNOSTIC  小车→地面站，52字节
-40 VISION_TARGET   天空K230→飞机，12字节
-41 VISION_LANDMARK 天空K230→飞机，10字节
+40 VISION_PIXEL    天空K230→飞机F4本地链路，12字节，不转发
+41 VISION_LANDMARK 保留，当前禁止发送
 42 VISION_LINE     小车K230→小车，11字节
 50 DROP_STATE      飞机→地面站
 51 LAND_STATE      飞机→地面站
@@ -42,11 +42,12 @@ LEN = 3 + DATA长度
 ```text
 TASK_START = run_id:u8, task_mode:u8, normal_speed:u16, action_speed:u16
 TRACK_EVENT = run_id:u8, event:u8, path_mm:u32
-VISION_TARGET = valid:u8, kind:u8, confidence:u16, dx/dy/dz/yaw:i16
-VISION_LANDMARK = valid:u8, kind:u8, confidence:u16, error_x/error_y/error_yaw:i16
+VISION_PIXEL = valid:u8, kind:u8, confidence:u16, dx_px/dy_px/radius_px/vision_mode:i16
 ```
 
 全局状态为0～13，`RETURN=9`；事件为 `B=1,C=2,D=3,A=4`。
+
+F4以飞控实际高度将像素测量换算为机体FRD厘米误差；像素帧不得离开机载K230—F4链路。
 
 ## 当前安全规则
 

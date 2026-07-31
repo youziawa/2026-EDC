@@ -98,9 +98,9 @@ def diagnoses(d: Diagnostic) -> list[str]:
         if start_delay:
             result.append("按键已锁存，正在执行10 s安全撤离倒计时")
         elif not key_raw:
-            result.append("按键未到达PA0：检查板载KEY、PA0配置和核心板接触")
+            result.append("开始键未到达PC0：检查按键板K3→H3-7/PC0、公共GND和内部上拉配置")
         elif not key_debounced:
-            result.append("PA0已变高但尚未消抖：持续按住至少20 ms")
+            result.append("PC0已拉低但尚未消抖：持续按住K3至少20 ms")
         else:
             result.append("按键已识别但状态仍为READY：检查任务主循环是否运行")
     elif not key_raw:

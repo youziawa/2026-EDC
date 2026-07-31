@@ -1,9 +1,15 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.idea/
+.vscode/
 build/
 *.o
 *.elf
 *.bin
 *.hex
+*.log
+*.uvguix.*
+Objects/
+Listings/
 !Car/STM32/CarF407/firmware/CarF407.elf

@@ -29,7 +29,7 @@ The canonical project specification is `LXS1_通信协议/LXS1_PROTOCOL.md`; reu
 
 ## Device contracts
 
-- Aircraft F407 receives `VISION_TARGET`/`VISION_LANDMARK` from sky K230, closes the mission state machine, sends semantic `FC_CMD` to the Lingxiao adapter, and publishes `TASK_STATE`/telemetry.
+- Aircraft F407 receives local `VISION_PIXEL` from sky K230, combines it with fresh FC height to close the tracking loop and mission state machine, sends semantic `FC_CMD` to the Lingxiao adapter, and publishes `TASK_STATE`/telemetry. The pixel frame never leaves the K230—F4 link.
 - Car F407 receives `VISION_LINE` from car K230, closes the motor/line-following loop, broadcasts `TASK_START`, and publishes `CAR_STATE`/`CAR_POSE`.
 - Sky K230 publishes target/platform errors with confidence and age. It must publish `valid=0` when a result is stale or unavailable; never repeat the last valid target without a validity flag.
 - Car K230 publishes line lateral error, heading error, curvature, confidence, and lost count. It must not own car speed or mission transitions.

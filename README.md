@@ -11,6 +11,7 @@
 - [LXS1通信协议](LXS1_通信协议/LXS1_PROTOCOL.md)
 - [统一状态机（队员版）](陆空协同统一状态机.md)
 - [统一状态机（AI/YAML版）](land_air_state_machine.yaml)
+- [按负责人交付文件清单](文件交付清单_2026-07-31.md)
 
 ## 目录
 

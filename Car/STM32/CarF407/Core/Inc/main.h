@@ -57,6 +57,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define TASK_LAND_KEY_Pin GPIO_PIN_3
+#define TASK_LAND_KEY_GPIO_Port GPIOE
+#define TASK_DROP_KEY_Pin GPIO_PIN_5
+#define TASK_DROP_KEY_GPIO_Port GPIOE
+#define TASK_START_KEY_Pin GPIO_PIN_0
+#define TASK_START_KEY_GPIO_Port GPIOC
+#define TASK_RESET_KEY_Pin GPIO_PIN_2
+#define TASK_RESET_KEY_GPIO_Port GPIOC
 #define USER_KEY_Pin GPIO_PIN_0
 #define USER_KEY_GPIO_Port GPIOA
 

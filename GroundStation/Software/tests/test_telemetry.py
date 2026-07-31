@@ -2,10 +2,18 @@ import struct
 import unittest
 
 from ground_station.protocol import Frame
-from ground_station.telemetry import Telemetry
+from ground_station.telemetry import Telemetry, task_execution_label, task_mode_title
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_task_mode_is_displayed_as_question_number(self):
+        self.assertEqual(task_mode_title(1), "题目一（抛投）")
+        self.assertEqual(task_mode_title(2), "题目二（动态起降）")
+        self.assertEqual(
+            task_execution_label(2, "降落小车"),
+            "正在执行：题目二（动态起降） · 降落小车",
+        )
+
     def test_car_position_is_derived_from_mileage(self):
         model = Telemetry()
         model.apply(Frame(4, 6, 0x31, struct.pack("<BBHBBB", 1, 20, 100, 0, 1, 0)), 1.0)

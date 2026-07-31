@@ -26,6 +26,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "board_io.h"
 #include "car_control.h"
 #include "car_link.h"
 #include "car_mission.h"
@@ -106,6 +107,7 @@ int main(void)
   MX_TIM4_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  BoardKeys_Init();
   if (CarControl_Init() != HAL_OK)
   {
     Error_Handler();
