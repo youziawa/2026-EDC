@@ -8,15 +8,11 @@
 
 #include <string.h>
 
-#define TASK_MODE_DROP                    1U
-#define TASK_MODE_DYNAMIC_LANDING         2U
-#ifndef CAR_MISSION_TASK_MODE
-#define CAR_MISSION_TASK_MODE             TASK_MODE_DROP
-#endif
-
 #define NORMAL_SPEED_MM_S                 150U
-#define ACTION_SPEED_MM_S                 80U
+#define ACTION_SPEED_MM_S                 100U
 #define REACQUIRE_SPEED_MM_S              40U
+#define AB_INITIAL_SPEED_MM_S             40U
+#define CAR_CMD_ACCELERATE                1U
 #define MAP_POINT_FINISH_COUNT            4U
 #define POINT_B_PATH_MM                   1500U
 #define POINT_C_PATH_MM                   3856U
@@ -29,6 +25,7 @@
 #define STATUS_PERIOD_MS                  100U
 #define C_ENTER_PERIOD_MS                 100U
 #define HEARTBEAT_PERIOD_MS               1000U
+#define TASK_START_RETRY_MS               500U
 #define FINISH_CONFIRM_MS                 300U
 #define GLOBAL_STATE_RETURN               9U
 
@@ -45,17 +42,25 @@ static struct
   CarMissionState state;
   CarMissionState pre_loss_state;
   uint8_t run_id;
+  CarMissionTaskMode task_mode;
   uint8_t start_requested;
+  uint8_t reset_requested;
   uint8_t start_countdown_active;
+  uint8_t drop_button_previous;
+  uint8_t land_button_previous;
+  uint8_t start_button_previous;
+  uint8_t reset_button_previous;
   uint8_t finish_marker;
   uint8_t map_point_count;
   uint8_t event_sent_mask;
   uint8_t aircraft_global_state;
+  uint8_t awaiting_aircraft_catch;
   uint32_t state_enter_ms;
   uint32_t action_enter_ms;
   uint32_t last_status_ms;
   uint32_t last_c_event_ms;
   uint32_t last_heartbeat_ms;
+  uint32_t last_task_start_ms;
 } mission;
 
 __weak uint8_t CarMission_ReadStartButton(void)
@@ -66,6 +71,21 @@ __weak uint8_t CarMission_ReadStartButton(void)
 __weak uint8_t CarMission_ReadStartButtonRaw(void)
 {
   return CarMission_ReadStartButton();
+}
+
+__weak uint8_t CarMission_ReadDropButton(void)
+{
+  return 0U;
+}
+
+__weak uint8_t CarMission_ReadLandButton(void)
+{
+  return 0U;
+}
+
+__weak uint8_t CarMission_ReadResetButton(void)
+{
+  return 0U;
 }
 
 static void send_to(CarLinkMask link, uint8_t destination,
@@ -91,6 +111,13 @@ static void publish_both(uint8_t message_id, const uint8_t *data,
           message_id, data, length);
   send_to(CAR_LINK_GROUND, LXS1_NODE_GROUND,
           message_id, data, length);
+}
+
+static uint8_t button_pressed_edge(uint8_t pressed, uint8_t *previous)
+{
+  uint8_t edge = ((pressed != 0U) && (*previous == 0U)) ? 1U : 0U;
+  *previous = pressed;
+  return edge;
 }
 
 static void enter_state(CarMissionState state)
@@ -119,10 +146,39 @@ static void publish_task_start(void)
 {
   uint8_t data[6];
   data[0] = mission.run_id;
-  data[1] = CAR_MISSION_TASK_MODE;
+  data[1] = (uint8_t)mission.task_mode;
   Lxs1_PutU16(&data[2], NORMAL_SPEED_MM_S);
   Lxs1_PutU16(&data[4], ACTION_SPEED_MM_S);
   publish_both(LXS1_MSG_TASK_START, data, sizeof(data));
+  mission.last_task_start_ms = HAL_GetTick();
+}
+
+static void reset_to_ready(void)
+{
+  uint8_t abort_data[2] = {mission.run_id, 1U};
+
+  if ((mission.run_id != 0U) &&
+      (mission.state != CAR_STATE_READY) &&
+      (mission.state != CAR_STATE_DONE))
+  {
+    publish_both(LXS1_MSG_TASK_ABORT, abort_data, sizeof(abort_data));
+  }
+
+  mission.start_requested = 0U;
+  mission.reset_requested = 0U;
+  mission.start_countdown_active = 0U;
+  mission.finish_marker = 0U;
+  mission.map_point_count = 0U;
+  mission.event_sent_mask = 0U;
+  mission.aircraft_global_state = 0U;
+  mission.awaiting_aircraft_catch = 0U;
+  mission.action_enter_ms = 0U;
+  mission.last_task_start_ms = 0U;
+  mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
+  CarControl_ClearFault();
+  CarOdometry_Reset();
+  LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+  stop_and_enter(CAR_STATE_READY);
 }
 
 static void publish_event(TrackEvent event, uint32_t path_mm)
@@ -219,6 +275,12 @@ static void publish_status(const CarOdometryData *odometry)
   {
     speed_mode = 3U;
   }
+  if ((mission.awaiting_aircraft_catch != 0U) &&
+      (mission.state >= CAR_STATE_STARTING) &&
+      (mission.state <= CAR_STATE_REACQUIRE))
+  {
+    speed_mode = 4U;
+  }
 
   state_data[0] = mission.run_id;
   state_data[1] = (uint8_t)mission.state;
@@ -257,6 +319,16 @@ static void process_received(void)
     {
       stop_and_enter(CAR_STATE_ABORT);
     }
+    else if ((frame->msg_id == LXS1_MSG_CAR_CMD) &&
+             (received.source_link == CAR_LINK_AIRCRAFT) &&
+             (frame->src == LXS1_NODE_AIR_MCU) &&
+             (frame->data_len >= 4U) &&
+             (frame->data[0] == mission.run_id) &&
+             (frame->data[1] == CAR_CMD_ACCELERATE))
+    {
+      mission.awaiting_aircraft_catch = 0U;
+      LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+    }
     else if ((frame->msg_id == LXS1_MSG_TASK_STATE) &&
              (received.source_link == CAR_LINK_AIRCRAFT) &&
              (frame->src == LXS1_NODE_AIR_MCU) &&
@@ -267,7 +339,9 @@ static void process_received(void)
       if ((mission.aircraft_global_state == GLOBAL_STATE_RETURN) &&
           (mission.state == CAR_STATE_ACTION_SLOW))
       {
-        LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+        LineFollow_SetCruiseSpeedMmps(
+            (mission.awaiting_aircraft_catch != 0U) ?
+            AB_INITIAL_SPEED_MM_S : NORMAL_SPEED_MM_S);
         enter_state(CAR_STATE_NORMAL_TRACK);
       }
     }
@@ -283,9 +357,10 @@ static void begin_run(void)
   mission.map_point_count = 0U;
   mission.event_sent_mask = 0U;
   mission.aircraft_global_state = 0U;
+  mission.awaiting_aircraft_catch = 1U;
   CarControl_ClearFault();
   CarOdometry_Reset();
-  LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+  LineFollow_SetCruiseSpeedMmps(AB_INITIAL_SPEED_MM_S);
   LineFollow_SetEnabled(0U);
   enter_state(CAR_STATE_STARTING);
   publish_task_start();
@@ -318,8 +393,13 @@ void CarMission_Init(void)
 {
   memset(&mission, 0, sizeof(mission));
   mission.state = CAR_STATE_READY;
+  mission.task_mode = CAR_TASK_DROP;
   mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
   mission.state_enter_ms = HAL_GetTick();
+  mission.drop_button_previous = CarMission_ReadDropButton();
+  mission.land_button_previous = CarMission_ReadLandButton();
+  mission.start_button_previous = CarMission_ReadStartButton();
+  mission.reset_button_previous = CarMission_ReadResetButton();
 }
 
 void CarMission_RequestStart(void)
@@ -327,9 +407,19 @@ void CarMission_RequestStart(void)
   mission.start_requested = 1U;
 }
 
+void CarMission_RequestReset(void)
+{
+  mission.reset_requested = 1U;
+}
+
 CarMissionState CarMission_GetState(void)
 {
   return mission.state;
+}
+
+CarMissionTaskMode CarMission_GetTaskMode(void)
+{
+  return mission.task_mode;
 }
 
 void CarMission_Task(void)
@@ -337,9 +427,46 @@ void CarMission_Task(void)
   uint32_t now_ms = HAL_GetTick();
   CarOdometryData odometry;
   LineFollowState line_state;
+  uint8_t drop_pressed;
+  uint8_t land_pressed;
+  uint8_t start_pressed;
+  uint8_t reset_pressed;
+  uint8_t drop_edge;
+  uint8_t land_edge;
+  uint8_t start_edge;
+  uint8_t reset_edge;
 
   process_received();
   CarOdometry_Get(&odometry);
+  drop_pressed = CarMission_ReadDropButton();
+  land_pressed = CarMission_ReadLandButton();
+  start_pressed = CarMission_ReadStartButton();
+  reset_pressed = CarMission_ReadResetButton();
+  drop_edge = button_pressed_edge(
+      drop_pressed, &mission.drop_button_previous);
+  land_edge = button_pressed_edge(
+      land_pressed, &mission.land_button_previous);
+  start_edge = button_pressed_edge(
+      start_pressed, &mission.start_button_previous);
+  reset_edge = button_pressed_edge(
+      reset_pressed, &mission.reset_button_previous);
+
+  if ((reset_edge != 0U) || (mission.reset_requested != 0U))
+  {
+    reset_to_ready();
+    drop_edge = 0U;
+    land_edge = 0U;
+    start_edge = 0U;
+  }
+
+  if ((mission.state == CAR_STATE_READY) &&
+      (mission.start_countdown_active == 0U))
+  {
+    if (drop_edge != 0U)
+      mission.task_mode = CAR_TASK_DROP;
+    else if (land_edge != 0U)
+      mission.task_mode = CAR_TASK_DYNAMIC_LANDING;
+  }
 
   if ((mission.state >= CAR_STATE_NORMAL_TRACK) &&
       (mission.state <= CAR_STATE_REACQUIRE))
@@ -349,7 +476,7 @@ void CarMission_Task(void)
   {
     if ((mission.start_countdown_active == 0U) &&
         ((mission.start_requested != 0U) ||
-         (CarMission_ReadStartButton() != 0U)))
+         (start_edge != 0U)))
     {
       mission.start_requested = 0U;
       mission.start_countdown_active = 1U;
@@ -381,7 +508,9 @@ void CarMission_Task(void)
     }
     else
     {
-      drive_straight_mm_s(STARTING_SEARCH_SPEED_MM_S);
+      drive_straight_mm_s(
+          (mission.awaiting_aircraft_catch != 0U) ?
+          STARTING_SEARCH_SPEED_MM_S : NORMAL_SPEED_MM_S);
     }
   }
   else if ((mission.state >= CAR_STATE_NORMAL_TRACK) &&
@@ -407,7 +536,9 @@ void CarMission_Task(void)
         {
           mission.event_sent_mask |= (1U << TRACK_EVENT_C_ENTER);
           mission.action_enter_ms = now_ms;
-          LineFollow_SetCruiseSpeedMmps(ACTION_SPEED_MM_S);
+          LineFollow_SetCruiseSpeedMmps(
+              (mission.awaiting_aircraft_catch != 0U) ?
+              AB_INITIAL_SPEED_MM_S : ACTION_SPEED_MM_S);
           mission.pre_loss_state = CAR_STATE_ACTION_SLOW;
           enter_state(CAR_STATE_ACTION_SLOW);
         }
@@ -424,7 +555,9 @@ void CarMission_Task(void)
       {
         mission.event_sent_mask |= (1U << TRACK_EVENT_D_EXIT);
         publish_event(TRACK_EVENT_D_EXIT, odometry.path_mm);
-        LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+        LineFollow_SetCruiseSpeedMmps(
+            (mission.awaiting_aircraft_catch != 0U) ?
+            AB_INITIAL_SPEED_MM_S : NORMAL_SPEED_MM_S);
         mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
         enter_state(CAR_STATE_NORMAL_TRACK);
       }
@@ -432,7 +565,9 @@ void CarMission_Task(void)
                ((now_ms - mission.action_enter_ms) >=
                 ACTION_SLOW_MAX_MS))
       {
-        LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+        LineFollow_SetCruiseSpeedMmps(
+            (mission.awaiting_aircraft_catch != 0U) ?
+            AB_INITIAL_SPEED_MM_S : NORMAL_SPEED_MM_S);
         mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
         enter_state(CAR_STATE_NORMAL_TRACK);
       }
@@ -455,8 +590,10 @@ void CarMission_Task(void)
                 (mission.state == CAR_STATE_REACQUIRE)))
       {
         uint16_t restored_speed =
-            (mission.pre_loss_state == CAR_STATE_ACTION_SLOW) ?
-            ACTION_SPEED_MM_S : NORMAL_SPEED_MM_S;
+            (mission.awaiting_aircraft_catch != 0U) ?
+            AB_INITIAL_SPEED_MM_S :
+            ((mission.pre_loss_state == CAR_STATE_ACTION_SLOW) ?
+             ACTION_SPEED_MM_S : NORMAL_SPEED_MM_S);
         LineFollow_SetCruiseSpeedMmps(restored_speed);
         enter_state(mission.pre_loss_state);
       }
@@ -489,5 +626,12 @@ void CarMission_Task(void)
     uint8_t data[2] = {mission.run_id, (uint8_t)mission.state};
     mission.last_heartbeat_ms = now_ms;
     publish_both(LXS1_MSG_HEARTBEAT, data, sizeof(data));
+  }
+  if ((mission.awaiting_aircraft_catch != 0U) &&
+      (mission.state >= CAR_STATE_STARTING) &&
+      (mission.state <= CAR_STATE_REACQUIRE) &&
+      ((now_ms - mission.last_task_start_ms) >= TASK_START_RETRY_MS))
+  {
+    publish_task_start();
   }
 }

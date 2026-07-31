@@ -11,7 +11,7 @@ from tkinter import messagebox, ttk
 from .map_view import FieldMap
 from .protocol import BROADCAST, DEVICE_NAMES, Frame, GROUND_STATION, MSG_NAMES, Parser, encode
 from .simulator import Simulator
-from .telemetry import Telemetry
+from .telemetry import Telemetry, task_execution_label
 from .transport import SerialTransport, list_ports, serial_available
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -278,7 +278,7 @@ class GroundStationApp(tk.Tk):
         age = now - t.last_frame_at if t.last_frame_at else float("inf")
         if self.transport.connected:
             self.vars["link"].set("在线" if age <= 2 else f"遥测超时 {age:.1f}s")
-        self.vars["task"].set(("抛投任务" if t.task_mode == 1 else "动态起降" if t.task_mode == 2 else "待命") + f" · {t.task_state}")
+        self.vars["task"].set(task_execution_label(t.task_mode, t.task_state))
         self.vars["elapsed"].set(f"{t.elapsed_ms / 1000:.1f} s")
         self.vars["drone_state"].set(t.drone.state + (" · 已解锁" if t.armed else " · 未解锁"))
         self.vars["drone_pos"].set(_position(t.drone.x, t.drone.y))

@@ -7,6 +7,11 @@
 本文件与 `land_air_state_machine.yaml`、小车 STM32 当前实现保持一致。凌霄飞控
 原厂协议不属于 LXS1，由飞机主控适配层转换。
 
+> **协议修订（2026-07-31）**：`0x40` 是天空端 K230 到飞机 F4 的**机载本地像素
+> 测量帧**，不是节点间厘米坐标遥测。K230 只输出像素测量；F4 结合飞控实际高度
+> 完成距离计算并用于控制。该帧不得转发到小车、地面站或凌霄飞控。原有帧头、
+> 长度、编号、字节序和 K230 字段均不变。
+
 ## 1. 物理拓扑
 
 ECB02不能一主多从，系统使用三条独立点对点链路、每个设备两块无线模块：
@@ -59,7 +64,7 @@ AA 55 | LEN | SRC | DST | MSG | DATA[0..N-1] | 0D 0A
 | `0x01` | HELLO | 任意→对应主控/地面站 |
 | `0x02` | HEARTBEAT | 任意→对应主控/地面站 |
 | `0x10` | TASK_START | 小车→飞机、地面站 |
-| `0x11` | TASK_ABORT | 飞机/地面站→广播 |
+| `0x11` | TASK_ABORT | 地面站或小车实体复位键→飞机、小车、地面站 |
 | `0x12` | TASK_STATE | 飞机→小车、地面站 |
 | `0x20` | FC_CMD | 飞机主控→飞控适配端 |
 | `0x21` | FC_STATE | 飞控适配端→飞机、地面站 |
@@ -69,8 +74,8 @@ AA 55 | LEN | SRC | DST | MSG | DATA[0..N-1] | 0D 0A
 | `0x32` | CAR_POSE | 小车→飞机、地面站 |
 | `0x33` | TRACK_EVENT | 小车→飞机、地面站 |
 | `0x34` | CAR_DIAGNOSTIC | 小车→地面站 |
-| `0x40` | VISION_TARGET | 天空端K230→飞机 |
-| `0x41` | VISION_LANDMARK | 天空端K230→飞机 |
+| `0x40` | VISION_PIXEL | 天空端K230→飞机F4（机载本地） |
+| `0x41` | VISION_LANDMARK | 预留（当前天空K230未定义发送格式） |
 | `0x42` | VISION_LINE | 小车K230→小车 |
 | `0x43` | VISION_DIAG | K230→对应主控/地面站 |
 | `0x50` | DROP_STATE | 飞机→地面站 |
@@ -135,7 +140,9 @@ AA 55 | LEN | SRC | DST | MSG | DATA[0..N-1] | 0D 0A
 1      reason:u8
 ```
 
-仅当 `run_id`等于当前任务时执行。飞机安全降落，小车立即停车。
+仅当 `run_id`等于当前任务时执行。飞机安全降落，小车立即停车。除地面站紧急中止外，
+小车1×4按键板的K4也可由小车节点发出该帧，接收端必须接受来源为
+`LXS1_NODE_CAR_MCU` 的实体安全复位。
 
 ### 6.3 TASK_STATE `0x12`，14字节，飞机以100 ms周期发送
 
@@ -213,42 +220,44 @@ key_raw, key_debounced, k230_received, k230_fresh_valid,
 marker_fresh, motor_standby, direction_forward, motor_start_delay
 ```
 
-## 8. 天空视觉消息
+## 8. 天空视觉本地接口
 
-坐标统一采用飞机机体系FRD：X前、Y右、Z下；距离单位cm。地面目标通常
-`dz_cm > 0`。航向误差沿Z轴向下看顺时针为正。若现有飞控使用其他坐标系，
-只允许在飞机主控适配层转换，K230和LXS1字段含义不变。
+本节只适用于同一架飞机内的“天空端 K230 ↔ 飞机 F4”串口。该接口复用 LXS1
+帧外壳以复用解析器，但其载荷是像素测量，**不属于飞机—小车—地面站之间的
+厘米坐标协议**。
 
-### 8.1 VISION_TARGET `0x40`，12字节，10～20 Hz
+F4 收到有效像素帧后，必须使用同一时刻的新鲜飞控实际高度（及后续需要时的姿态）
+计算目标相对位置；F4 内部统一得到 FRD：X 前、Y 右、Z 下，距离单位 cm。若
+控制器内部使用“Y 左为正”等坐标，只允许在 F4 控制适配层转换。
+
+### 8.1 VISION_PIXEL `0x40`，12字节，10～20 Hz
 
 ```text
 0      valid:u8
 1      target_kind:u8      1小车，2小车起降平台
 2..3   confidence:u16      0..1000
-4..5   dx_cm:i16           前方为正
-6..7   dy_cm:i16           右方为正
-8..9   dz_cm:i16           下方为正
-10..11 yaw_error_deg:i16   顺时针为正
+4..5   dx_px:i16           平台中心相对图像中心的水平像素偏差，右方为正
+6..7   dy_px:i16           平台中心相对图像中心的垂直像素偏差，下方为正
+8..9   radius_px:i16       外圆半径，像素
+10..11 vision_mode:i16     1 ACQUIRE，2 TRACK，3 LOST
 ```
 
-### 8.2 VISION_LANDMARK `0x41`，10字节，10～20 Hz
+`target_kind`：`1` 小车，`2` 小车起降平台。现有脚本固定发送 `2`。
 
-```text
-0      valid:u8
-1      marker_kind:u8      1返航H点，2投放标志，3车载降落标志
-2..3   confidence:u16      0..1000
-4..5   error_x_cm:i16      前方为正
-6..7   error_y_cm:i16      右方为正
-8..9   error_yaw_deg:i16   顺时针为正
-```
+`VISION_LANDMARK 0x41` 保留编号但当前未定义载荷，禁止根据旧版厘米字段实现或发送。
+后续如需 K230 辅助 H 点、投放标志或平台精对准，应先补充同样由 F4 完成尺度换算的
+本地像素载荷定义，再同步更新本文件、C/Python 库和各端实现。
 
 要求：
 
-- `valid=0`时所有误差字段清零，不沿用旧结果。
-- 飞机主控按接收时刻判断新鲜度；超过300 ms按无效处理。
+- `valid=0`时 `dx_px/dy_px/radius_px`必须清零，不沿用旧结果；`vision_mode`允许为
+  `VISION_LOST`。
+- 飞机F4按接收时刻判断新鲜度；超过300 ms按视觉无效处理。控制用的新鲜度可更严，
+  例如120 ms，但不得用1 Hz心跳刷新视觉时间戳。
 - SEARCH阶段允许 `valid=0`；FOLLOW/DROP/LAND_CAR进入精确动作前必须满足连续
   有效帧和置信度门槛。
-- 视觉只输出测量结果，不直接发送飞控动作。
+- K230只输出测量结果，不直接发送飞控动作；F4计算出的相对位置只在飞机内部使用，
+  除非后续另行定义并统一实现对外消息。
 
 ## 9. 小车视觉 VISION_LINE `0x42`，11字节，40 Hz
 
@@ -318,7 +327,7 @@ marker_fresh, motor_standby, direction_forward, motor_start_delay
 
 | 消息 | 周期/要求 |
 |---|---:|
-| VISION_TARGET、VISION_LANDMARK | 50～100 ms |
+| VISION_PIXEL | 50～100 ms |
 | VISION_LINE | 25 ms |
 | TASK_STATE | 100 ms |
 | CAR_STATE、CAR_POSE、CAR_DIAGNOSTIC | 100 ms |
@@ -328,5 +337,6 @@ marker_fresh, motor_standby, direction_forward, motor_start_delay
 - 飞机视觉超过300 ms未更新：置无效并执行视觉丢失策略。
 - 飞控状态超过500 ms未更新：停止发送新的运动动作，进入飞控安全策略。
 - 地面站离线不影响飞机和小车完成正常任务。
-- 正式任务仅允许地面站查询和 `TASK_ABORT`，不提供手动驾驶。
+- 正式任务仅允许地面站查询和 `TASK_ABORT`，不提供手动驾驶；小车仅允许通过实体K4
+  发送安全中止，不允许由此扩展远程手动驾驶。
 - UART接收建议DMA+空闲中断；中断只搬运数据，主循环完成解析和业务分发。

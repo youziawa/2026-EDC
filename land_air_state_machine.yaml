@@ -91,7 +91,7 @@ global_states:
     description: 跟随小车并等待C点事件
   DROP:
     code: 5
-    description: 在C到D区间执行抛投
+    description: 在C到D区间持续伴飞小车并执行单次抛投
   LAND_CAR:
     code: 6
     description: 在C到D区间降落到移动平台
@@ -280,7 +280,7 @@ state_machines:
           - open_action_window
           - mark_drop_started_once
         periodic_actions:
-          - search_align_and_drop_when_stable
+          - continuously_follow_search_align_and_drop_when_stable
           - publish_TASK_STATE
           - publish_DROP_STATE
         exit_actions:
@@ -297,7 +297,7 @@ state_machines:
           - open_action_window
           - mark_drop_started_once
         periodic_actions:
-          - align_and_drop_when_stable
+          - continuously_follow_align_and_drop_when_stable
           - publish_TASK_STATE
           - publish_DROP_STATE
         exit_actions:
@@ -881,6 +881,7 @@ invariants:
   - TASK_STATE_is_periodic
   - C_ENTER_is_periodic_while_in_action_zone
   - drop_descent_takeoff_and_disarm_are_single_trigger_actions
+  - DROP_continuously_matches_car_velocity_position_and_heading_before_and_after_release
   - no_ACTION_WAIT_C_global_state_exists
   - FOLLOW_waits_for_C_ENTER
 

@@ -39,8 +39,9 @@ enum lxs1_msg_id {
     LXS1_MSG_CAR_POSE = 0x32,
     LXS1_MSG_TRACK_EVENT = 0x33,
     LXS1_MSG_CAR_DIAGNOSTIC = 0x34,
-    LXS1_MSG_VISION_TARGET = 0x40,
-    LXS1_MSG_VISION_LANDMARK = 0x41,
+    /* K230 -> aircraft F4 only; payload is pixel measurements, never forwarded. */
+    LXS1_MSG_VISION_PIXEL = 0x40,
+    LXS1_MSG_VISION_LANDMARK_RESERVED = 0x41,
     LXS1_MSG_VISION_LINE = 0x42,
     LXS1_MSG_VISION_DIAG = 0x43,
     LXS1_MSG_DROP_STATE = 0x50,

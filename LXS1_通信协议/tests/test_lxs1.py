@@ -10,9 +10,8 @@ from lxs1 import (
     encode,
     pack_task_start,
     pack_task_state,
-    pack_vision_landmark,
     pack_vision_line,
-    pack_vision_target,
+    pack_vision_pixel,
 )
 from car_diagnostic_monitor import PAYLOAD, decode_diagnostic, diagnoses
 
@@ -70,15 +69,12 @@ class LXS1Tests(unittest.TestCase):
         self.assertEqual(task_state[:4], bytes((7, 1, 9, 0)))
 
     def test_air_vision_payload_layouts_and_invalid_zeroing(self):
-        target = pack_vision_target(1, 1, 900, 10, -20, 150, -3)
-        self.assertEqual(len(target), 12)
-        invalid_target = pack_vision_target(0, 1, 0, 10, 20, 30, 40)
-        self.assertEqual(invalid_target[4:], bytes(8))
+        pixel = pack_vision_pixel(1, 2, 900, 10, -20, 68, 2)
+        self.assertEqual(len(pixel), 12)
+        invalid_pixel = pack_vision_pixel(0, 2, 0, 10, 20, 68, 3)
+        self.assertEqual(invalid_pixel[4:10], bytes(6))
+        self.assertEqual(invalid_pixel[10:12], bytes((3, 0)))
 
-        landmark = pack_vision_landmark(1, 1, 850, 5, -7, 2)
-        self.assertEqual(len(landmark), 10)
-        invalid_landmark = pack_vision_landmark(0, 1, 0, 5, 7, 2)
-        self.assertEqual(invalid_landmark[4:], bytes(6))
 
     def test_car_diagnostic_points_to_driver_wiring(self):
         data = PAYLOAD.pack(
@@ -98,7 +94,7 @@ class LXS1Tests(unittest.TestCase):
         )
         suggestions = "\n".join(diagnoses(decode_diagnostic(data)))
         self.assertIn("10 s安全撤离倒计时", suggestions)
-        self.assertNotIn("按键未到达PA0", suggestions)
+        self.assertNotIn("开始键未到达PC0", suggestions)
 
 
 if __name__ == "__main__":

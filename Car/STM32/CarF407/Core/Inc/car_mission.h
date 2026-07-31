@@ -21,14 +21,25 @@ typedef enum
   CAR_STATE_FAULT = 9U
 } CarMissionState;
 
+typedef enum
+{
+  CAR_TASK_DROP = 1U,
+  CAR_TASK_DYNAMIC_LANDING = 2U
+} CarMissionTaskMode;
+
 void CarMission_Init(void);
 void CarMission_Task(void);
 void CarMission_RequestStart(void);
+void CarMission_RequestReset(void);
 CarMissionState CarMission_GetState(void);
+CarMissionTaskMode CarMission_GetTaskMode(void);
 
 /* Override in a board file after assigning and debouncing a real GPIO. */
 uint8_t CarMission_ReadStartButton(void);
 uint8_t CarMission_ReadStartButtonRaw(void);
+uint8_t CarMission_ReadDropButton(void);
+uint8_t CarMission_ReadLandButton(void);
+uint8_t CarMission_ReadResetButton(void);
 
 #ifdef __cplusplus
 }

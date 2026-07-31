@@ -20,10 +20,33 @@ CAR_MISSION_STATES = [
 LEGACY_CAR_STATES = ["待机", "运行", "完成", "故障", "终止"]
 DROP_STATES = ["未动作", "释放", "完成", "失败"]
 LAND_STATES = ["未开始", "下降", "已着陆", "停留", "完成", "失败"]
+TASK_MODE_TITLES = {
+    1: "题目一（抛投）",
+    2: "题目二（动态起降）",
+}
 
 
 def _name(items: list[str], value: int) -> str:
     return items[value] if 0 <= value < len(items) else f"未知({value})"
+
+
+def task_mode_title(task_mode: int) -> str:
+    return TASK_MODE_TITLES.get(task_mode, "题目未选择")
+
+
+def task_execution_label(task_mode: int, task_state: str) -> str:
+    title = TASK_MODE_TITLES.get(task_mode)
+    if title is None:
+        return f"等待任务 · {task_state}"
+    if task_state == "完成":
+        prefix = "已完成"
+    elif task_state == "已终止":
+        prefix = "已终止"
+    elif task_state == "故障":
+        prefix = "故障"
+    else:
+        prefix = "正在执行"
+    return f"{prefix}：{title} · {task_state}"
 
 
 def _u24(data: bytes) -> int:
@@ -86,7 +109,7 @@ class Telemetry:
                 self.task_mode = data[1]
                 events.append(
                     f"任务启动：run_id={self.run_id}，"
-                    f"模式={'抛投' if self.task_mode == 1 else '动态起降'}"
+                    f"模式={task_mode_title(self.task_mode)}"
                 )
             elif frame.msg_id == 0x12 and len(data) >= 14:
                 # LXS1 v1.1: run_id, task_mode, global_state, result,

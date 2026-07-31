@@ -85,8 +85,9 @@ MSG_CAR_STATE = 0x31
 MSG_CAR_POSE = 0x32
 MSG_TRACK_EVENT = 0x33
 MSG_CAR_DIAGNOSTIC = 0x34
-MSG_VISION_TARGET = 0x40
-MSG_VISION_LANDMARK = 0x41
+# K230 -> aircraft F4 only; payload is pixel measurements, never forwarded.
+MSG_VISION_PIXEL = 0x40
+MSG_VISION_LANDMARK_RESERVED = 0x41
 MSG_VISION_LINE = 0x42
 MSG_VISION_DIAG = 0x43
 MSG_DROP_STATE = 0x50
@@ -130,43 +131,24 @@ def pack_task_state(
     )
 
 
-def pack_vision_target(
+def pack_vision_pixel(
     valid: int,
     target_kind: int,
     confidence_permille: int,
-    dx_cm: int,
-    dy_cm: int,
-    dz_cm: int,
-    yaw_error_deg: int,
+    dx_px: int,
+    dy_px: int,
+    radius_px: int,
+    vision_mode: int,
 ) -> bytes:
     return struct.pack(
         "<BBHhhhh",
         1 if valid else 0,
         target_kind,
         confidence_permille,
-        dx_cm if valid else 0,
-        dy_cm if valid else 0,
-        dz_cm if valid else 0,
-        yaw_error_deg if valid else 0,
-    )
-
-
-def pack_vision_landmark(
-    valid: int,
-    marker_kind: int,
-    confidence_permille: int,
-    error_x_cm: int,
-    error_y_cm: int,
-    error_yaw_deg: int,
-) -> bytes:
-    return struct.pack(
-        "<BBHhhh",
-        1 if valid else 0,
-        marker_kind,
-        confidence_permille,
-        error_x_cm if valid else 0,
-        error_y_cm if valid else 0,
-        error_yaw_deg if valid else 0,
+        dx_px if valid else 0,
+        dy_px if valid else 0,
+        radius_px if valid else 0,
+        vision_mode,
     )
 
 
