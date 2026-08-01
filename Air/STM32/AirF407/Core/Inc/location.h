@@ -16,6 +16,12 @@ typedef struct
 
 extern target_location_t target_location;
 
+/* F407 -> Lingxiao three-byte flight-action frame: FD action 0D. */
+#define FLIGHT_ACTION_NONE           0U
+#define FLIGHT_ACTION_LAND_HOME      1U
+#define FLIGHT_ACTION_LAND_PLATFORM  2U
+#define FLIGHT_ACTION_RETAKEOFF      3U
+
 int16_t Location_GetCurrentWaypointZ(void);
 void Location_InitWaypoints(void);
 uint16_t Location_GetWaypointCount(void);
@@ -25,7 +31,7 @@ uint8_t Location_AdvanceWaypoint(void);
 uint8_t Location_IsCurrentWaypointLast(void);
 void Location_StartReturnHome(void);
 uint8_t Location_IsReturnHomeActive(void);
-void Location_SetMissionDonePending(uint8_t pending);
+void Location_SetMissionDonePending(uint8_t action);
 uint8_t Location_GetMissionDonePending(void);
 uint8_t Location_AssignCameraNumberOnSwitch(uint16_t camera_number);
 

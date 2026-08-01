@@ -8,7 +8,7 @@
  * USART6：SLAM原协议长度。
  */
 #define RX1_FRAME_LEN 10U
-#define SLAM_POSE_TIMEOUT_MS 300U
+#define SLAM_POSE_TIMEOUT_MS 800U
 
 /*
  * USART2：地面站旧协议长度。
@@ -64,6 +64,8 @@
 #define CAR_SPEED_MODE_WAITING_FOR_AIRCRAFT 4U
 #define CAR_STATE_DATA_LEN 13U
 #define CAR_STATE_TIMEOUT_MS 500U
+#define CAR_TRACK_EVENT_DATA_LEN 6U
+#define TRACK_EVENT_B_CROSS 1U
 #define CAR_RETURN_RETRY_MS 200U
 #define AIR_GLOBAL_STATE_RETURN 9U
 
@@ -236,6 +238,8 @@ static uint32_t uart5_car_cmd_last_tick = 0U;
 static uint8_t uart5_car_cmd_run_id = 0U;
 static uint8_t uart5_car_cmd_send_count = 0U;
 static uint8_t uart5_car_accel_acknowledged = 0U;
+static uint8_t uart5_landing_permitted = 0U;
+static uint8_t uart5_landing_run_id = 0U;
 static uint8_t uart5_return_tx_buf[LXS1_MAX_FRAME];
 static uint32_t uart5_return_last_tick = 0U;
 static uint8_t uart5_return_run_id = 0U;
@@ -876,6 +880,14 @@ static void Telecom_HandleUart5Frame(const lxs1_frame_t *frame)
             return;
         }
 
+        if ((Decision_IsTaskActive() == 0U) ||
+            (Decision_GetRunId() != frame->data[0]) ||
+            (Decision_GetTaskMode() != frame->data[1]))
+        {
+            uart5_landing_permitted = 0U;
+            uart5_landing_run_id = 0U;
+        }
+
         uart5_task_start_count++;
         Decision_OnTaskStart(frame->data[0], frame->data[1]);
     }
@@ -888,6 +900,11 @@ static void Telecom_HandleUart5Frame(const lxs1_frame_t *frame)
         }
 
         Decision_OnTaskAbort(frame->data[0]);
+        if (frame->data[0] == uart5_landing_run_id)
+        {
+            uart5_landing_permitted = 0U;
+            uart5_landing_run_id = 0U;
+        }
     }
     else if (frame->msg_id == LXS1_MSG_CAR_STATE)
     {
@@ -917,6 +934,19 @@ static void Telecom_HandleUart5Frame(const lxs1_frame_t *frame)
             (frame->data[2] != CAR_SPEED_MODE_WAITING_FOR_AIRCRAFT))
         {
             uart5_car_accel_acknowledged = 1U;
+        }
+    }
+    else if (frame->msg_id == LXS1_MSG_TRACK_EVENT)
+    {
+        /* CarF407 DATA: run_id, event, path_mm. Event 1 means B crossed. */
+        if ((frame->data_len == CAR_TRACK_EVENT_DATA_LEN) &&
+            (frame->data[1] == TRACK_EVENT_B_CROSS) &&
+            (Decision_IsTaskActive() != 0U) &&
+            (Decision_GetTaskMode() == AIR_TASK_DYNAMIC_LANDING) &&
+            (frame->data[0] == Decision_GetRunId()))
+        {
+            uart5_landing_permitted = 1U;
+            uart5_landing_run_id = frame->data[0];
         }
     }
 }
@@ -987,6 +1017,14 @@ uint8_t Telecom_GetCarAccelerationSendCount(void)
 uint8_t Telecom_IsCarAccelerationAcknowledged(void)
 {
     return uart5_car_accel_acknowledged;
+}
+
+uint8_t Telecom_IsCarLandingPermitted(void)
+{
+    return ((uart5_landing_permitted != 0U) &&
+            (Decision_IsTaskActive() != 0U) &&
+            (Decision_GetTaskMode() == AIR_TASK_DYNAMIC_LANDING) &&
+            (uart5_landing_run_id == Decision_GetRunId())) ? 1U : 0U;
 }
 
 uint8_t Telecom_IsCarStatusValid(void)
@@ -1091,6 +1129,8 @@ void Telecom_UART5_Init(void)
     uart5_car_cmd_run_id = 0U;
     uart5_car_cmd_send_count = 0U;
     uart5_car_accel_acknowledged = 0U;
+    uart5_landing_permitted = 0U;
+    uart5_landing_run_id = 0U;
     uart5_return_last_tick = 0U;
     uart5_return_run_id = 0U;
     car_status.valid = 0U;

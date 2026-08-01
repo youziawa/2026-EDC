@@ -137,6 +137,8 @@ extern _pwm_st pwm_to_esc;
 
 //public
 void ANO_LX_Task(void);
+/* Force the protocol real-time throttle field to its minimum during rearm. */
+void ANO_LX_SetThrottleMinOverride(u8 enable);
 
 #endif
 

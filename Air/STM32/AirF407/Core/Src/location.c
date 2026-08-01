@@ -12,7 +12,6 @@ static target_location_t g_waypoints[] =
     {
         {0,   0, 125, 0},
         {0, -40, 125, 0},
-        {85,-40, 125, 0},
         {200,-40, 125, 0},
 };
 
@@ -22,8 +21,14 @@ static uint16_t g_current_waypoint_index = 0; // 当前航点索引
 static uint8_t g_mission_done_pending = 0;
 static uint8_t g_return_home_active = 0U;
 
-/* 先在125 cm返航到原点，随后由凌霄一键降落到z=0。 */
-static const target_location_t g_return_home = {0, 0, 125, 0};
+/*
+ * SLAM return compensation: touchdown was repeatedly right/front of H.
+ * +X is forward and -Y is right, so bias the commanded point back/left.
+ */
+#define RETURN_HOME_X_COMP_CM (-12)
+#define RETURN_HOME_Y_COMP_CM 12
+static const target_location_t g_return_home =
+    {RETURN_HOME_X_COMP_CM, RETURN_HOME_Y_COMP_CM, 125, 0};
 
 void Location_InitWaypoints(void) // 初始化航点列表，并将目标位置设置为第一个航点。若无航点，则目标位置为0。
 {
@@ -138,14 +143,15 @@ uint8_t Location_IsReturnHomeActive(void)
     return g_return_home_active;
 }
 
-void Location_SetMissionDonePending(uint8_t pending) // 设置降落标识待发送状态，1表示待发送，0表示不待发送
+void Location_SetMissionDonePending(uint8_t action)
 {
-    g_mission_done_pending = pending; // 该函数由Move模块在到达最后一个航点时调用，触发降落标识发送流程
+    /* 0=none, 1=home land, 2=platform land, 3=platform retakeoff. */
+    g_mission_done_pending = action;
 }
 
-uint8_t Location_GetMissionDonePending(void) // 获取降落标识待发送状态，1表示待发送，0表示不待发送
+uint8_t Location_GetMissionDonePending(void)
 {
-    return g_mission_done_pending; // 该函数由Transmit模块在Transmit_ProcessMissionDone中调用，检查是否需要发送降落标识
+    return g_mission_done_pending;
 }
 
 // 将摄像头编号写入当前航点

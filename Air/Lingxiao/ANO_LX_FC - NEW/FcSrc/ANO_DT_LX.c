@@ -79,6 +79,7 @@ void ANO_DT_LX_Send_High_To_F407(void)
     u8 data[15];
     u8 SC = 0;
     u8 AC = 0;
+    u8 i;
     s32 HIGH_Pro;
 
     /* 填写帧头和其他字段 */
@@ -86,6 +87,12 @@ void ANO_DT_LX_Send_High_To_F407(void)
     data[1] = 0xFF;
     data[2] = 0x05;
     data[3] = 0x09;
+
+    /* Unused ALT_REL field. */
+    data[4] = 0U;
+    data[5] = 0U;
+    data[6] = 0U;
+    data[7] = 0U;
 
     /* 一帧高度只读取一次 */
     HIGH_Pro = HIGH;
@@ -95,7 +102,20 @@ void ANO_DT_LX_Send_High_To_F407(void)
     data[10] = (u8)((u32)HIGH_Pro >> 16);
     data[11] = (u8)((u32)HIGH_Pro >> 24);
 
-    /* 填写data[12]，然后计算SC、AC并发送 */
+    /* ALT_STA=1 means that the laser-height sample is valid. */
+    data[12] = 1U;
+
+    /* ANO double-accumulation checksum over frame[0] through frame[12]. */
+    for (i = 0U; i < 13U; i++)
+    {
+        SC += data[i];
+        AC += SC;
+    }
+    data[13] = SC;
+    data[14] = AC;
+
+    /* Board UART2 is the dedicated Lingxiao <-> aircraft F407 link. */
+    DrvUart2SendBuf(data, (u8)sizeof(data));
 }
 //===================================================================
 // 数据接收程序
