@@ -36,6 +36,12 @@ _fc_bat_un fc_bat;
 _fc_att_un fc_att;
 _fc_att_qua_un fc_att_qua;
 _fc_vel_un fc_vel;
+static u8 throttle_min_override;
+
+void ANO_LX_SetThrottleMinOverride(u8 enable)
+{
+	throttle_min_override = (enable != 0U) ? 1U : 0U;
+}
 
 //遥控CH5(AUX1)通道值(1000-1500-2000)设置模式1-2-3，模式0需要通过单独发送指令设置
 //模式0：姿态自稳    ->遥控CH1-CH4直接控制姿态和油门。
@@ -142,7 +148,16 @@ static inline void RC_Data_Task(float dT_s)
 //		{		
 			rt_tar.st_data.rol = tmp_ch_dz[ch_1_rol] * 0.00217f * MAX_ANGLE;
 			rt_tar.st_data.pit = -tmp_ch_dz[ch_2_pit] * 0.00217f * MAX_ANGLE;		//因为摇杆俯仰方向和定义的俯仰方向相反，所以取负
-			rt_tar.st_data.thr = (rc_in.rc_ch.st_data.ch_[ch_3_thr] - 1000);		//0.1%
+			if (throttle_min_override != 0U)
+			{
+				/* Rearm requires the protocol throttle to stay at its minimum. */
+				rt_tar.st_data.thr = 0;
+			}
+			else
+			{
+				rt_tar.st_data.thr =
+					(rc_in.rc_ch.st_data.ch_[ch_3_thr] - 1000);		//0.1%
+			}
 			rt_tar.st_data.yaw_dps = -tmp_ch_dz[ch_4_yaw] * 0.00238f * MAX_YAW_DPS; //因为摇杆航向方向和定义的航向方向相反，所以取负		
 //		}
 		//############(实时控制帧，自主开发闭环控制，在这里赋值即可)##############

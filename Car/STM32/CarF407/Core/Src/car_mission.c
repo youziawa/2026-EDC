@@ -10,6 +10,7 @@
 
 #define NORMAL_SPEED_MM_S                 150U
 #define ACTION_SPEED_MM_S                 100U
+#define TASK2_LANDING_SPEED_MM_S           10U
 #define REACQUIRE_SPEED_MM_S              40U
 #define AB_INITIAL_SPEED_MM_S             40U
 #define CAR_CMD_ACCELERATE                1U
@@ -23,7 +24,7 @@
 #define STARTING_TIMEOUT_MS               3000U
 #define ACTION_SLOW_MAX_MS                25000U
 #define STATUS_PERIOD_MS                  100U
-#define C_ENTER_PERIOD_MS                 100U
+#define TRACK_EVENT_RETRY_MS              100U
 #define HEARTBEAT_PERIOD_MS               1000U
 #define TASK_START_RETRY_MS               500U
 #define FINISH_CONFIRM_MS                 300U
@@ -58,6 +59,7 @@ static struct
   uint32_t state_enter_ms;
   uint32_t action_enter_ms;
   uint32_t last_status_ms;
+  uint32_t last_b_event_ms;
   uint32_t last_c_event_ms;
   uint32_t last_heartbeat_ms;
   uint32_t last_task_start_ms;
@@ -142,13 +144,44 @@ static void drive_straight_mm_s(uint16_t speed_mm_s)
   CarControl_SetWheelTargetsPps(left_pps, right_pps);
 }
 
+static uint16_t action_speed_mm_s(void)
+{
+  return (mission.task_mode == CAR_TASK_DYNAMIC_LANDING) ?
+      TASK2_LANDING_SPEED_MM_S : ACTION_SPEED_MM_S;
+}
+
+static uint16_t active_cruise_speed_mm_s(void)
+{
+  /* Task 2 crawls after B until the aircraft reports retakeoff/return. */
+  if ((mission.task_mode == CAR_TASK_DYNAMIC_LANDING) &&
+      (mission.map_point_count >= 1U) &&
+      (mission.aircraft_global_state != GLOBAL_STATE_RETURN))
+  {
+    return TASK2_LANDING_SPEED_MM_S;
+  }
+
+  if (mission.awaiting_aircraft_catch != 0U)
+  {
+    return AB_INITIAL_SPEED_MM_S;
+  }
+
+  if ((mission.task_mode == CAR_TASK_DROP) &&
+      (mission.map_point_count >= 2U) &&
+      (mission.map_point_count < 3U))
+  {
+    return action_speed_mm_s();
+  }
+
+  return NORMAL_SPEED_MM_S;
+}
+
 static void publish_task_start(void)
 {
   uint8_t data[6];
   data[0] = mission.run_id;
   data[1] = (uint8_t)mission.task_mode;
   Lxs1_PutU16(&data[2], NORMAL_SPEED_MM_S);
-  Lxs1_PutU16(&data[4], ACTION_SPEED_MM_S);
+  Lxs1_PutU16(&data[4], action_speed_mm_s());
   publish_both(LXS1_MSG_TASK_START, data, sizeof(data));
   mission.last_task_start_ms = HAL_GetTick();
 }
@@ -327,7 +360,7 @@ static void process_received(void)
              (frame->data[1] == CAR_CMD_ACCELERATE))
     {
       mission.awaiting_aircraft_catch = 0U;
-      LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
+      LineFollow_SetCruiseSpeedMmps(active_cruise_speed_mm_s());
     }
     else if ((frame->msg_id == LXS1_MSG_TASK_STATE) &&
              (received.source_link == CAR_LINK_AIRCRAFT) &&
@@ -340,11 +373,15 @@ static void process_received(void)
           (mission.state >= CAR_STATE_NORMAL_TRACK) &&
           (mission.state <= CAR_STATE_REACQUIRE))
       {
-        /* Aircraft has dropped and left visual follow: finish the lap normally. */
+        /*
+         * The aircraft has left visual follow.  In Task 2 this is the first
+         * safe point to leave crawl speed: it has already landed, waited five
+         * seconds and completed the second takeoff.  Task 1 is idempotent
+         * because its catch command normally cleared this flag earlier.
+         */
+        mission.awaiting_aircraft_catch = 0U;
         mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
-        LineFollow_SetCruiseSpeedMmps(
-            (mission.awaiting_aircraft_catch != 0U) ?
-            AB_INITIAL_SPEED_MM_S : NORMAL_SPEED_MM_S);
+        LineFollow_SetCruiseSpeedMmps(NORMAL_SPEED_MM_S);
         if ((mission.state == CAR_STATE_NORMAL_TRACK) ||
             (mission.state == CAR_STATE_ACTION_SLOW))
         {
@@ -365,6 +402,8 @@ static void begin_run(void)
   mission.event_sent_mask = 0U;
   mission.aircraft_global_state = 0U;
   mission.awaiting_aircraft_catch = 1U;
+  mission.last_b_event_ms = 0U;
+  mission.last_c_event_ms = 0U;
   CarControl_ClearFault();
   CarOdometry_Reset();
   LineFollow_SetCruiseSpeedMmps(AB_INITIAL_SPEED_MM_S);
@@ -533,6 +572,25 @@ void CarMission_Task(void)
           ((mission.event_sent_mask & (1U << TRACK_EVENT_B_CROSS)) == 0U))
       {
         mission.event_sent_mask |= (1U << TRACK_EVENT_B_CROSS);
+        mission.last_b_event_ms = now_ms;
+        publish_event(TRACK_EVENT_B_CROSS, odometry.path_mm);
+
+        if (mission.task_mode == CAR_TASK_DYNAMIC_LANDING)
+        {
+          mission.action_enter_ms = now_ms;
+          LineFollow_SetCruiseSpeedMmps(active_cruise_speed_mm_s());
+          mission.pre_loss_state = CAR_STATE_ACTION_SLOW;
+          enter_state(CAR_STATE_ACTION_SLOW);
+        }
+      }
+
+      /* Repeat Task-2's B permission until aircraft return is acknowledged. */
+      if ((mission.task_mode == CAR_TASK_DYNAMIC_LANDING) &&
+          (mission.map_point_count >= 1U) &&
+          (mission.aircraft_global_state != GLOBAL_STATE_RETURN) &&
+          ((now_ms - mission.last_b_event_ms) >= TRACK_EVENT_RETRY_MS))
+      {
+        mission.last_b_event_ms = now_ms;
         publish_event(TRACK_EVENT_B_CROSS, odometry.path_mm);
       }
 
@@ -542,15 +600,20 @@ void CarMission_Task(void)
              (1U << TRACK_EVENT_C_ENTER)) == 0U)
         {
           mission.event_sent_mask |= (1U << TRACK_EVENT_C_ENTER);
-          mission.action_enter_ms = now_ms;
-          LineFollow_SetCruiseSpeedMmps(
-              (mission.awaiting_aircraft_catch != 0U) ?
-              AB_INITIAL_SPEED_MM_S : ACTION_SPEED_MM_S);
-          mission.pre_loss_state = CAR_STATE_ACTION_SLOW;
-          enter_state(CAR_STATE_ACTION_SLOW);
+          mission.last_c_event_ms = now_ms;
+          publish_event(TRACK_EVENT_C_ENTER, odometry.path_mm);
+
+          if (mission.task_mode == CAR_TASK_DROP)
+          {
+            mission.action_enter_ms = now_ms;
+            LineFollow_SetCruiseSpeedMmps(active_cruise_speed_mm_s());
+            mission.pre_loss_state = CAR_STATE_ACTION_SLOW;
+            enter_state(CAR_STATE_ACTION_SLOW);
+          }
         }
-        if ((mission.map_point_count == 2U) &&
-            ((now_ms - mission.last_c_event_ms) >= C_ENTER_PERIOD_MS))
+        if ((mission.task_mode == CAR_TASK_DROP) &&
+            (mission.map_point_count == 2U) &&
+            ((now_ms - mission.last_c_event_ms) >= TRACK_EVENT_RETRY_MS))
         {
           mission.last_c_event_ms = now_ms;
           publish_event(TRACK_EVENT_C_ENTER, odometry.path_mm);
@@ -562,13 +625,16 @@ void CarMission_Task(void)
       {
         mission.event_sent_mask |= (1U << TRACK_EVENT_D_EXIT);
         publish_event(TRACK_EVENT_D_EXIT, odometry.path_mm);
-        LineFollow_SetCruiseSpeedMmps(
-            (mission.awaiting_aircraft_catch != 0U) ?
-            AB_INITIAL_SPEED_MM_S : NORMAL_SPEED_MM_S);
-        mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
-        enter_state(CAR_STATE_NORMAL_TRACK);
+        if ((mission.task_mode == CAR_TASK_DROP) ||
+            (mission.aircraft_global_state == GLOBAL_STATE_RETURN))
+        {
+          LineFollow_SetCruiseSpeedMmps(active_cruise_speed_mm_s());
+          mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
+          enter_state(CAR_STATE_NORMAL_TRACK);
+        }
       }
       else if ((mission.state == CAR_STATE_ACTION_SLOW) &&
+               (mission.task_mode == CAR_TASK_DROP) &&
                ((now_ms - mission.action_enter_ms) >=
                 ACTION_SLOW_MAX_MS))
       {
@@ -596,11 +662,7 @@ void CarMission_Task(void)
                ((mission.state == CAR_STATE_LOST_HOLD) ||
                 (mission.state == CAR_STATE_REACQUIRE)))
       {
-        uint16_t restored_speed =
-            (mission.awaiting_aircraft_catch != 0U) ?
-            AB_INITIAL_SPEED_MM_S :
-            ((mission.pre_loss_state == CAR_STATE_ACTION_SLOW) ?
-             ACTION_SPEED_MM_S : NORMAL_SPEED_MM_S);
+        uint16_t restored_speed = active_cruise_speed_mm_s();
         LineFollow_SetCruiseSpeedMmps(restored_speed);
         enter_state(mission.pre_loss_state);
       }

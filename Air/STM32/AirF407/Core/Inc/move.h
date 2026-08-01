@@ -93,6 +93,9 @@ void Move_VisionFollowStop(void);
 /* 1 when K230 currently owns horizontal control; otherwise 0. */
 uint8_t Move_IsVisionFollowing(void);
 
+/* 1 after five consecutive centred frames have confirmed a genuine catch. */
+uint8_t Move_IsVisionCatchConfirmed(void);
+
 MoveTurnResult_t Move_RequestRelativeTurn(
     MoveRelativeTurn_t turn);
 

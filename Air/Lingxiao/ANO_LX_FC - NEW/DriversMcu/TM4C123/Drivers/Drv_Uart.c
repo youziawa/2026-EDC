@@ -97,13 +97,16 @@ static volatile s16 U2PoseYaw = 0;
 // 位姿数据最新值（U2路径：TM4C硬件UART4/底板串口2）
 static volatile u8 U2PoseUpdated = 0; // 收到一帧新位姿后置1（被ReadPose读取后清0）
 // 降落标识事件与位姿共用U2路径（TM4C硬件UART4/底板串口2）
-static volatile u8 U5MissionDoneUpdated = 0; // 收到FD 01 0D后置1（被ReadMissionDone读取后清0）
+/* Pending F407 flight action: 1=home land, 2=platform land, 3=retakeoff. */
+static volatile u8 U5MissionDoneUpdated = 0;
 
 #define U2_POSE_FRAME_HEAD 0xFB
 #define U2_POSE_FRAME_TAIL 0x0D
 #define U2_POSE_FRAME_LEN 10
 #define MISSION_DONE_HEAD 0xFD
-#define MISSION_DONE_FLAG 0x01
+#define FLIGHT_ACTION_LAND_HOME 0x01
+#define FLIGHT_ACTION_LAND_PLATFORM 0x02
+#define FLIGHT_ACTION_RETAKEOFF 0x03
 #define MISSION_DONE_TAIL 0x0D
 #define MISSION_DONE_FRAME_LEN 3
 
@@ -146,10 +149,11 @@ static void U2PoseDataReceive(u8 data)
 			}
 			else if ((frame_len == MISSION_DONE_FRAME_LEN) &&
 					 (rx_buf[0] == MISSION_DONE_HEAD) &&
-					 (rx_buf[1] == MISSION_DONE_FLAG) &&
+					 (rx_buf[1] >= FLIGHT_ACTION_LAND_HOME) &&
+					 (rx_buf[1] <= FLIGHT_ACTION_RETAKEOFF) &&
 					 (rx_buf[2] == MISSION_DONE_TAIL))
 			{
-				U5MissionDoneUpdated = 1;
+				U5MissionDoneUpdated = rx_buf[1];
 			}
 
 			// 重新同步：
@@ -330,14 +334,14 @@ void UART3_IRQHandler(void)
 
 u8 DrvUart5ReadMissionDone(void)
 {
-	// 保留旧接口名；事件现在由U2位姿/降落复用解析器产生。
-	u8 has_new = U5MissionDoneUpdated;
-	if (has_new)
+	/* Keep the legacy name, but return the action byte from FD action 0D. */
+	u8 action = U5MissionDoneUpdated;
+	if (action != 0U)
 	{
 		U5MissionDoneUpdated = 0;
 	}
 
-	return has_new;
+	return action;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

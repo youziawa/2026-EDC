@@ -222,6 +222,8 @@ uint32_t Telecom_GetCarBadTaskCount(void);
 uint32_t Telecom_GetCarUartErrorCount(void);
 uint8_t Telecom_GetCarAccelerationSendCount(void);
 uint8_t Telecom_IsCarAccelerationAcknowledged(void);
+/* True only after this Task-2 run receives the car's B-cross event. */
+uint8_t Telecom_IsCarLandingPermitted(void);
 uint8_t Telecom_IsCarStatusValid(void);
 const CarStatusData_t *Telecom_GetCarStatus(void);
 

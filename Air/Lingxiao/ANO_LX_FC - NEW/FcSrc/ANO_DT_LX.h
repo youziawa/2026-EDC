@@ -8,6 +8,9 @@
 
 extern s32 HIGH; // 高度数据
 
+/* Send the current laser height to the aircraft F407 over board UART2. */
+void ANO_DT_LX_Send_High_To_F407(void);
+
 typedef struct
 {
 	u8 D_Addr;		 //Ŀ���ַ

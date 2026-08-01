@@ -14,19 +14,22 @@ uint16_t cur_waypoint_index;
 #define ARRIVAL_HOVER_MS 1500U  // 到点确认后悬停时长(1s)
 #define MOVE_ENABLE_HOVER 0U    // 1=到点悬停, 0=不悬停
 #define ARRIVAL_ENTER_POS_TOL 10//到点位置容忍度(cm), 误差小于等于该值时认为到达
+#define RETURN_ARRIVAL_POS_TOL 5//返航补偿点使用更严格的到点容差
 #define ARRIVAL_EXIT_POS_TOL 15
 #define ARRIVAL_YAW_TOL 8
 #define PID_SCALE 100 // 该结构体定义了PID控制器的参数和状态变量
 /* 位置控制速度规划 */
 #define MOVE_CRUISE_ERR_CM 20
-#define MOVE_CRUISE_SPEED 20//起飞后先右再前的追车航线速度
+#define MOVE_CRUISE_SPEED 35//起飞后先右再前的追车航线速度
 #define MOVE_RETURN_SPEED 25//抛物后返回起飞点的速度
-#define VISION_CHASE_SPEED 22//视觉追车速度；限制重捕获时的大幅修正
+#define VISION_CHASE_SPEED 28//视觉追车速度；限制重捕获时的大幅修正
+#define VISION_SETTLED_FOLLOW_SPEED 18//追上小车后的柔和跟随限速
 #define MOVE_APPROACH_MIN_SPEED 5
 // 平滑斜率限制（每周期最大变化量，与pid.slew_limit一致）
 #define SMOOTH_SLEW_LIMIT 2
-/* yaw进入允许范围后，再稳定200ms才确认方向已经改变 */
-#define MOVE_TURN_CONFIRM_TICKS 10U
+/* yaw进入允许范围后，再稳定100ms才确认方向已经改变 */
+#define MOVE_TURN_CONFIRM_TICKS 5U
+#define MOVE_TRANSLATION_YAW_TOL 20
 /* TASK_START后直接起飞至125 cm并保持3 s，6 s后释放水平航线。 */
 #define TASK_TAKEOFF_SETTLE_MS 6000U
 #define TASK_ROUTE_FIRST_WAYPOINT_INDEX 1U
@@ -72,13 +75,6 @@ uint16_t cur_waypoint_index;
  */
 #define VISION_FOLLOW_AUTO_ARM 0U
 
-/*
- * Index 1 is the rightward waypoint (0,-40), while index 2 is the first
- * forward waypoint (85,-40).  Visual acquisition may only start after the
- * rightward waypoint has been completed and the car has announced this run.
- */
-#define VISION_ARM_MIN_WAYPOINT_INDEX 2U
-
 /* K230已完成圆环+十字验证；再确认2帧即可接管，避免低帧率下追车过晚。 */
 #define VISION_TAKEOVER_CONFIRM_FRAMES 2U
 
@@ -87,10 +83,22 @@ uint16_t cur_waypoint_index;
 #define VISION_ACCEL_CONFIRM_FRAMES 5U
 
 /* Moving-target velocity feed-forward for low-error visual tracking. */
-#define VISION_VELOCITY_ALPHA 0.15f
-#define VISION_VELOCITY_LIMIT_CM_S 8.0f
+#define VISION_VELOCITY_ALPHA 0.30f
+#define VISION_VELOCITY_LIMIT_CM_S 14.0f
 #define VISION_VELOCITY_MIN_DT_MS 30U
 #define VISION_VELOCITY_MAX_DT_MS 200U
+
+/*
+ * Dynamic-landing tuning below 60 cm.
+ * The car is already creeping at 1 cm/s here, so a large chase command or a
+ * long-held stale command only pushes the red point out of the camera view.
+ */
+#define VISION_LOW_ALT_THRESHOLD_CM          60
+#define VISION_LOW_ALT_COMMAND_LIMIT_CM_S     8
+#define VISION_LOW_ALT_SLEW_LIMIT_CM_S        2
+#define VISION_LOW_ALT_VELOCITY_LIMIT_CM_S    3.0f
+#define VISION_LOW_ALT_MAX_FRAME_AGE_MS     250U
+#define VISION_LOW_ALT_RAW_FILTER_WEIGHT      0.35f
 
 /*
  * 视觉接管后允许短暂漏检。窗口内继续保持最后一条安全水平指令；
@@ -318,8 +326,8 @@ static int16_t MovePid_Step(AxisPid_t *pid, int16_t error,
 static void MovePid_Init(void) // 初始化PID控制器的参数
 {
     pid_x.deadband = 3;
-    pid_x.out_limit = 25;
-    pid_x.slew_limit = 1;
+    pid_x.out_limit = 40;
+    pid_x.slew_limit = 2;
     pid_x.i_limit = 100; // 增大积分限幅，消除静差
     pid_x.kp = 14;
     pid_x.ki = 1;
@@ -329,8 +337,8 @@ static void MovePid_Init(void) // 初始化PID控制器的参数
     // Y轴相同
     // pid_y = pid_x;
     pid_y.deadband = 3;
-    pid_y.out_limit = 25;
-    pid_y.slew_limit = 1;
+    pid_y.out_limit = 40;
+    pid_y.slew_limit = 2;
     pid_y.i_limit = 100;
     pid_y.kp = 18;
     pid_y.ki = 1;
@@ -351,16 +359,18 @@ static void MovePid_Init(void) // 初始化PID控制器的参数
  */
 pid_vision_x = pid_x;
 
-/* 视觉前后方向最大限制为15cm/s */
+/* 视觉追赶上限；提高斜率响应以便接近目标时及时刹车。 */
 pid_vision_x.out_limit = VISION_CHASE_SPEED;
+pid_vision_x.slew_limit = 6;
 
 MovePid_Reset(&pid_vision_x);
 
 
 pid_vision_y = pid_y;
 
-/* 视觉左右方向最大限制为15cm/s */
+/* 视觉追赶上限；提高斜率响应以便接近目标时及时刹车。 */
 pid_vision_y.out_limit = VISION_CHASE_SPEED;
+pid_vision_y.slew_limit = 6;
 
 MovePid_Reset(&pid_vision_y);
 
@@ -465,28 +475,30 @@ static int16_t Move_VisionErrorToInt16(float error_cm)
     return (int16_t)(error_cm - 0.5f);
 }
 
-static float Move_ClampVisionVelocity(float velocity_cm_s)
+static float Move_ClampVisionVelocity(float velocity_cm_s,
+                                      float velocity_limit_cm_s)
 {
-    if (velocity_cm_s > VISION_VELOCITY_LIMIT_CM_S)
+    if (velocity_cm_s > velocity_limit_cm_s)
     {
-        return VISION_VELOCITY_LIMIT_CM_S;
+        return velocity_limit_cm_s;
     }
-    if (velocity_cm_s < -VISION_VELOCITY_LIMIT_CM_S)
+    if (velocity_cm_s < -velocity_limit_cm_s)
     {
-        return -VISION_VELOCITY_LIMIT_CM_S;
+        return -velocity_limit_cm_s;
     }
     return velocity_cm_s;
 }
 
-static int16_t Move_ClampVisionCommand(int32_t command_cm_s)
+static int16_t Move_ClampVisionCommand(int32_t command_cm_s,
+                                       int16_t speed_limit_cm_s)
 {
-    if (command_cm_s > VISION_CHASE_SPEED)
+    if (command_cm_s > speed_limit_cm_s)
     {
-        return VISION_CHASE_SPEED;
+        return speed_limit_cm_s;
     }
-    if (command_cm_s < -VISION_CHASE_SPEED)
+    if (command_cm_s < -speed_limit_cm_s)
     {
-        return -VISION_CHASE_SPEED;
+        return (int16_t)(-speed_limit_cm_s);
     }
     return (int16_t)command_cm_s;
 }
@@ -574,6 +586,9 @@ void Move_VisionFollowArm(void)
     vision_debug.conversion_valid = 0U;
     vision_debug.small_range = 0U;
     vision_debug.small_range = 0U;
+
+    /* Start K230 acquisition as soon as the mission takeoff begins. */
+    Telecom_RequestVisionStart();
 }
 
 /* End visual following and allow waypoint control on the next cycle. */
@@ -633,6 +648,11 @@ uint8_t Move_IsVisionFollowing(void)
     return vision_follow_latched;
 }
 
+uint8_t Move_IsVisionCatchConfirmed(void)
+{
+    return vision_car_accel_notified;
+}
+
 /*
  * Return 0 when normal waypoint control should continue.
  * Return 1 when visual control owns XY and Move_Update() must return.
@@ -640,6 +660,7 @@ uint8_t Move_IsVisionFollowing(void)
 static uint8_t Move_UpdateVisionFollow(void)
 {
     float target_distance_cm;
+    int32_t measured_height_cm;
     float raw_err_x_cm;
     float raw_err_y_cm;
     int16_t err_x_cm;
@@ -648,16 +669,23 @@ static uint8_t Move_UpdateVisionFollow(void)
     int16_t pid_cmd_y_cm_s;
     int16_t feedforward_x_cm_s;
     int16_t feedforward_y_cm_s;
+    int16_t vision_command_limit_cm_s;
     uint8_t vision_valid;
     uint8_t use_cruise_speed;
+    uint8_t low_altitude_visual;
     uint32_t now_tick;
     uint32_t motion_dt_ms;
     float measured_vx_cm_s;
     float measured_vy_cm_s;
+    float velocity_limit_cm_s;
 
     vision_debug.armed = vision_follow_armed;
     vision_debug.following = vision_follow_latched;
     now_tick = HAL_GetTick();
+    low_altitude_visual =
+        ((Decision_GetTaskMode() == AIR_TASK_DYNAMIC_LANDING) &&
+         (Decision_GetCommandedHeightCm() <=
+          VISION_LOW_ALT_THRESHOLD_CM)) ? 1U : 0U;
 
     if (vision_follow_armed == 0U)
     {
@@ -671,6 +699,28 @@ static uint8_t Move_UpdateVisionFollow(void)
     }
 
     vision_valid = Telecom_IsVisionValid();
+
+    /*
+     * Telecom_IsVisionValid() intentionally tolerates a long link gap for
+     * high-altitude chase.  Near the deck that would hold the last horizontal
+     * speed for too long, so brake after 250 ms without a fresh K230 frame.
+     * Keep the visual latch and the last processed frame id: a genuinely new
+     * frame can resume tracking without falling back to the map route.
+     */
+    if ((low_altitude_visual != 0U) &&
+        (vision_follow_latched != 0U) &&
+        (vision_target.rx_tick != 0U) &&
+        ((uint32_t)(now_tick - vision_target.rx_tick) >
+         VISION_LOW_ALT_MAX_FRAME_AGE_MS))
+    {
+        Move_StopHorizontal();
+        move_cmd.dyaw = 0;
+        MovePid_Reset(&pid_vision_x);
+        MovePid_Reset(&pid_vision_y);
+        Move_ResetVisionMotionEstimate();
+        vision_debug.conversion_valid = 0U;
+        return 1U;
+    }
 
     /*
      * Before takeover, keep flying the waypoint route. Only new valid
@@ -705,6 +755,8 @@ static uint8_t Move_UpdateVisionFollow(void)
         }
 
         vision_follow_latched = 1U;
+        /* Outbound B is an acquisition point, never a landing point. */
+        Location_SetMissionDonePending(0U);
         vision_have_error = 0U;
         vision_small_range = 0U;
         vision_last_rx_tick = 0U;
@@ -764,8 +816,38 @@ static uint8_t Move_UpdateVisionFollow(void)
  * 飞机按固定135 cm高度运行。
  * K230只提供像素偏移，水平位置换算不依赖实时高度。
  */
-target_distance_cm =
-    VISION_FIXED_TARGET_DISTANCE_CM;
+    measured_height_cm = (int32_t)VISION_FIXED_TARGET_DISTANCE_CM;
+    target_distance_cm = VISION_FIXED_TARGET_DISTANCE_CM;
+
+    /*
+     * Task 2 descends while tracking.  Scale pixel error with the fresh
+     * measured deck distance so the controller does not over-correct near
+     * touchdown.  A conservative 20 cm floor keeps centring authority at
+     * very low altitude.  Task 1 retains its flight-tested 125 cm scale.
+     */
+    if (Decision_GetTaskMode() == AIR_TASK_DYNAMIC_LANDING)
+    {
+        if (Telecom_GetFlightHeightCm(&measured_height_cm) == 0U)
+        {
+            measured_height_cm = Decision_GetCommandedHeightCm();
+        }
+
+        if (measured_height_cm < 20)
+        {
+            measured_height_cm = 20;
+        }
+        else if (measured_height_cm > 150)
+        {
+            measured_height_cm = 150;
+        }
+
+        target_distance_cm = (float)measured_height_cm;
+
+        if (measured_height_cm <= VISION_LOW_ALT_THRESHOLD_CM)
+        {
+            low_altitude_visual = 1U;
+        }
+    }
 
     /*
      * K230 updates more slowly than Move_Update(). Process each visual
@@ -799,19 +881,44 @@ target_distance_cm =
     /* Low-pass filter only when a new K230 result arrives. */
     if (vision_have_error == 0U)
     {
-        vision_err_x_filt_cm = raw_err_x_cm;
-        vision_err_y_filt_cm = raw_err_y_cm;
+        if (low_altitude_visual != 0U)
+        {
+            /* Ramp in a reacquired low-altitude target instead of stepping. */
+            vision_err_x_filt_cm =
+                VISION_LOW_ALT_RAW_FILTER_WEIGHT * raw_err_x_cm;
+            vision_err_y_filt_cm =
+                VISION_LOW_ALT_RAW_FILTER_WEIGHT * raw_err_y_cm;
+        }
+        else
+        {
+            vision_err_x_filt_cm = raw_err_x_cm;
+            vision_err_y_filt_cm = raw_err_y_cm;
+        }
         vision_have_error = 1U;
     }
     else
     {
-        vision_err_x_filt_cm =
-            0.3f * vision_err_x_filt_cm +
-            0.7f * raw_err_x_cm;
+        if (low_altitude_visual != 0U)
+        {
+            vision_err_x_filt_cm =
+                (1.0f - VISION_LOW_ALT_RAW_FILTER_WEIGHT) *
+                    vision_err_x_filt_cm +
+                VISION_LOW_ALT_RAW_FILTER_WEIGHT * raw_err_x_cm;
+            vision_err_y_filt_cm =
+                (1.0f - VISION_LOW_ALT_RAW_FILTER_WEIGHT) *
+                    vision_err_y_filt_cm +
+                VISION_LOW_ALT_RAW_FILTER_WEIGHT * raw_err_y_cm;
+        }
+        else
+        {
+            vision_err_x_filt_cm =
+                0.3f * vision_err_x_filt_cm +
+                0.7f * raw_err_x_cm;
 
-        vision_err_y_filt_cm =
-            0.3f * vision_err_y_filt_cm +
-            0.7f * raw_err_y_cm;
+            vision_err_y_filt_cm =
+                0.3f * vision_err_y_filt_cm +
+                0.7f * raw_err_y_cm;
+        }
     }
 
     /*
@@ -822,6 +929,10 @@ target_distance_cm =
      */
     if (vision_motion_valid != 0U)
     {
+        velocity_limit_cm_s =
+            (low_altitude_visual != 0U) ?
+                VISION_LOW_ALT_VELOCITY_LIMIT_CM_S :
+                VISION_VELOCITY_LIMIT_CM_S;
         motion_dt_ms =
             (uint32_t)(vision_target.rx_tick - vision_motion_last_tick);
         if ((motion_dt_ms >= VISION_VELOCITY_MIN_DT_MS) &&
@@ -835,9 +946,11 @@ target_distance_cm =
                  (float)motion_dt_ms) + (float)move_cmd.dy;
 
             measured_vx_cm_s =
-                Move_ClampVisionVelocity(measured_vx_cm_s);
+                Move_ClampVisionVelocity(measured_vx_cm_s,
+                                         velocity_limit_cm_s);
             measured_vy_cm_s =
-                Move_ClampVisionVelocity(measured_vy_cm_s);
+                Move_ClampVisionVelocity(measured_vy_cm_s,
+                                         velocity_limit_cm_s);
 
             vision_target_vx_cm_s =
                 (1.0f - VISION_VELOCITY_ALPHA) * vision_target_vx_cm_s +
@@ -869,8 +982,9 @@ target_distance_cm =
     /*
      * Keep the car at its initial creep speed while the aircraft closes a
      * large visual error.  Five consecutive centred frames constitute a
-     * genuine catch and make the acceleration request resistant to a single
-     * noisy/reacquired blob.
+     * genuine catch and make feed-forward/car acceleration resistant to a
+     * single noisy or reacquired blob. Both tasks share the same A-to-B
+     * catch-and-accelerate flow; Task 2 slows to 1 cm/s after crossing B.
      */
     if (vision_car_accel_notified == 0U)
     {
@@ -941,8 +1055,7 @@ target_distance_cm =
     vision_debug.armed = vision_follow_armed;
     vision_debug.following = vision_follow_latched;
     vision_debug.conversion_valid = 1U;
-    vision_debug.laser_height_cm =
-        (int32_t)VISION_FIXED_TARGET_DISTANCE_CM;
+    vision_debug.laser_height_cm = measured_height_cm;
     vision_debug.target_distance_cm = target_distance_cm;
     vision_debug.raw_body_x_cm = raw_err_x_cm;
     vision_debug.raw_body_y_cm = raw_err_y_cm;
@@ -954,16 +1067,42 @@ target_distance_cm =
      * Far from target, retain the normal cruise-speed branch. Inside
      * the fine range, use the visual PID output directly.
      */
+    vision_command_limit_cm_s =
+        (vision_car_accel_notified != 0U) ?
+            VISION_SETTLED_FOLLOW_SPEED : VISION_CHASE_SPEED;
+
+    if (low_altitude_visual != 0U)
+    {
+        vision_command_limit_cm_s =
+            VISION_LOW_ALT_COMMAND_LIMIT_CM_S;
+        use_cruise_speed = 0U;
+        pid_vision_x.slew_limit =
+            VISION_LOW_ALT_SLEW_LIMIT_CM_S;
+        pid_vision_y.slew_limit =
+            VISION_LOW_ALT_SLEW_LIMIT_CM_S;
+        pid_vision_x.out_limit =
+            VISION_LOW_ALT_COMMAND_LIMIT_CM_S;
+        pid_vision_y.out_limit =
+            VISION_LOW_ALT_COMMAND_LIMIT_CM_S;
+    }
+    else
+    {
+        pid_vision_x.slew_limit = 6;
+        pid_vision_y.slew_limit = 6;
+        pid_vision_x.out_limit = VISION_CHASE_SPEED;
+        pid_vision_y.out_limit = VISION_CHASE_SPEED;
+    }
+
     pid_cmd_x_cm_s =
         MovePid_Step(&pid_vision_x,
                      err_x_cm,
                      use_cruise_speed,
-                     VISION_CHASE_SPEED);
+                     vision_command_limit_cm_s);
     pid_cmd_y_cm_s =
         MovePid_Step(&pid_vision_y,
                      err_y_cm,
                      use_cruise_speed,
-                     VISION_CHASE_SPEED);
+                     vision_command_limit_cm_s);
 
     /* Do not amplify noisy edge-of-frame reacquisition before a real catch. */
     if (vision_car_accel_notified != 0U)
@@ -980,9 +1119,11 @@ target_distance_cm =
     }
 
     move_cmd.dx = Move_ClampVisionCommand(
-        (int32_t)pid_cmd_x_cm_s + feedforward_x_cm_s);
+        (int32_t)pid_cmd_x_cm_s + feedforward_x_cm_s,
+        vision_command_limit_cm_s);
     move_cmd.dy = Move_ClampVisionCommand(
-        (int32_t)pid_cmd_y_cm_s + feedforward_y_cm_s);
+        (int32_t)pid_cmd_y_cm_s + feedforward_y_cm_s,
+        vision_command_limit_cm_s);
 
     /* Visual following does not own altitude or yaw. */
     move_cmd.dyaw = 0;
@@ -1063,7 +1204,7 @@ static uint8_t Move_UpdateHeadingState(int16_t target_yaw,
      * yaw还没有进入允许范围。
      * 转向过程中必须停止水平移动。
      */
-    if (abs16(yaw_error) > ARRIVAL_YAW_TOL)
+    if (abs16(yaw_error) > MOVE_TRANSLATION_YAW_TOL)
     {
         /*
          * 也处理“方向没变，但是yaw被吹偏”的情况。
@@ -1082,7 +1223,7 @@ static uint8_t Move_UpdateHeadingState(int16_t target_yaw,
     }
 
     /*
-     * yaw已经进入±8°，但还需要连续稳定200ms。
+     * yaw已经进入平移容差，但还需要连续稳定100ms。
      */
     if ((move_current_heading_valid == 0U) ||
         (move_current_heading != move_pending_heading) ||
@@ -1212,6 +1353,7 @@ void Move_Update(void)
     int16_t cur_y = pose_data.y;
     uint8_t has_next_waypoint;     // 是否有下一个航点
     uint8_t reached_this_waypoint; // 是否已到达当前航点，是否严格进入5cm
+    int16_t arrival_pos_tolerance;
 #if (MOVE_ENABLE_HOVER == 1U)
     uint8_t stayed_near_target;    // 是否仍在8cm保持范围
 #endif
@@ -1268,6 +1410,7 @@ void Move_Update(void)
         move_launch_run_id = Decision_GetRunId();
         move_launch_start_tick = now_tick;
         Move_VisionFollowStop();
+        Move_VisionFollowArm();
 
         /*
          * 航点0只是起飞原点。任务开始后预置到航点1，6秒起飞门控
@@ -1296,22 +1439,6 @@ void Move_Update(void)
         MovePid_Reset(&pid_y);
         MovePid_Reset(&pid_yaw);
         return;
-    }
-
-    /*
-     * Two independent gates prevent the takeoff marker from taking over XY:
-     *   1. the initial rightward leg must already be complete;
-     *   2. this aircraft must have received the car's current TASK_START.
-     *
-     * This check runs every control cycle.  Therefore it still arms correctly
-     * when the aircraft reaches index 2 before the later-starting car moves.
-     */
-    if ((vision_follow_armed == 0U) &&
-        (Decision_IsReturning() == 0U) &&
-        (current_waypoint_index >= VISION_ARM_MIN_WAYPOINT_INDEX) &&
-        (Decision_IsTaskActive() != 0U))
-    {
-        Move_VisionFollowArm();
     }
 
     /* 无新鲜SLAM位姿时禁止继续输出水平运动。 */
@@ -1383,11 +1510,15 @@ move_cmd.dyaw =
         ((uint16_t)(current_waypoint_index + 1U) < waypoint_count));
 
     // 到达当前航点判定：当x、y、yaw误差都在容忍范围内时认为到达
-// 严格到达判断：X、Y必须进入±5cm，yaw误差必须在允许范围内
+arrival_pos_tolerance =
+    (Decision_IsReturning() != 0U) ?
+        RETURN_ARRIVAL_POS_TOL : ARRIVAL_ENTER_POS_TOL;
+
+// 返航进入±5cm，普通航点进入±10cm，yaw误差必须在允许范围内
 reached_this_waypoint =
     (uint8_t)((heading_ready != 0U) &&
-              (abs16(err_x) <= ARRIVAL_ENTER_POS_TOL) &&
-              (abs16(err_y) <= ARRIVAL_ENTER_POS_TOL) &&
+              (abs16(err_x) <= arrival_pos_tolerance) &&
+              (abs16(err_y) <= arrival_pos_tolerance) &&
               (abs16(err_yaw) <= ARRIVAL_YAW_TOL));
 
 #if (MOVE_ENABLE_HOVER == 1U)
@@ -1458,9 +1589,9 @@ if (move_arrival_handled == 0U)
 										Move_StopHorizontal();
 								}
                 }
-                else
+                else if (Decision_IsReturning() != 0U)
                 {
-                    Location_SetMissionDonePending(111U);
+                    Location_SetMissionDonePending(FLIGHT_ACTION_LAND_HOME);
                 }
             }
         }
@@ -1495,9 +1626,9 @@ if ((move_arrival_confirm_ticks >= ARRIVAL_CONFIRM_TICKS) &&
 					Move_StopHorizontal();
 			}
     }
-    else
+    else if (Decision_IsReturning() != 0U)
     {
-        Location_SetMissionDonePending(111U);
+        Location_SetMissionDonePending(FLIGHT_ACTION_LAND_HOME);
     }
 }
 

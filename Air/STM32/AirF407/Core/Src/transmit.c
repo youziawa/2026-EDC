@@ -52,7 +52,7 @@ extern target_location_t target_location;
 #if (TRANSMIT_POSE_ASCII_MODE == 1U)
 static uint8_t pose_ascii_tx_buf[48U];
 #endif
-static const uint8_t mission_done_buf[MISSION_DONE_FRAME_LEN] = {0xFD, 0x01, 0x0D};
+static uint8_t mission_done_buf[MISSION_DONE_FRAME_LEN] = {0xFD, 0x01, 0x0D};
 
 // 最近一次位姿发送时刻, 用于控制发送周期
 static uint32_t pose_last_tick = 0U;
@@ -67,21 +67,7 @@ static void PointChoose(void);
 /* 起飞阶段始终发送125 cm，6 s结束后恢复发送当前航点高度。 */
 static int16_t Transmit_GetCommandedHeightCm(void)
 {
-    uint32_t elapsed_ms;
-
-    if (Decision_IsTaskActive() == 0U)
-    {
-        return 0;
-    }
-
-    /* 与Move共用时钟，确保高度阶段和水平航线同时切换。 */
-    elapsed_ms = Move_GetLaunchElapsedMs();
-    if (elapsed_ms < TAKEOFF_TOTAL_MS)
-    {
-        return LINGXIAO_TAKEOFF_TARGET_CM;
-    }
-
-    return (int16_t)Location_GetCurrentWaypointZ();
+    return Decision_GetCommandedHeightCm();
 }
 
 // 通用中断发送入口定义: 由调用方指定串口句柄(huart1/huart2)
@@ -185,13 +171,23 @@ uint8_t Transmit_SendMissionDone(void)
     return 0U;
 #else
     HAL_StatusTypeDef status;
+    uint8_t action;
 
     if (huart1.gState != HAL_UART_STATE_READY)
     {
         return 0U;
     }
 
-    // 为排查FD 01 0D完整性，降落标识使用USART1阻塞发送，确保3字节连续发出。
+    action = Location_GetMissionDonePending();
+    if ((action < FLIGHT_ACTION_LAND_HOME) ||
+        (action > FLIGHT_ACTION_RETAKEOFF))
+    {
+        return 0U;
+    }
+
+    mission_done_buf[1] = action;
+
+    /* Send FD action 0D as one blocking write so all three bytes stay intact. */
     status = HAL_UART_Transmit(&huart1, (uint8_t *)mission_done_buf, (uint16_t)sizeof(mission_done_buf), MISSION_DONE_TX_TIMEOUT_MS);
 
     if (status == HAL_OK)
