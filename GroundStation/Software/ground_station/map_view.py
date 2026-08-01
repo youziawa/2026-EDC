@@ -7,6 +7,7 @@ import tkinter as tk
 from PIL import Image, ImageTk
 
 from .telemetry import Telemetry
+from .track import drone_position_from_home
 
 
 class FieldMap(tk.Canvas):
@@ -31,7 +32,10 @@ class FieldMap(tk.Canvas):
                 self.car_trail.append(point)
                 self.car_trail = self.car_trail[-600:]
         if telemetry.drone.x is not None and telemetry.drone.y is not None:
-            point = (telemetry.drone.x, telemetry.drone.y)
+            point = drone_position_from_home(
+                telemetry.drone.x,
+                telemetry.drone.y,
+            )
             if not self.drone_trail or _distance(point, self.drone_trail[-1]) > 2:
                 self.drone_trail.append(point)
                 self.drone_trail = self.drone_trail[-600:]
@@ -74,7 +78,18 @@ class FieldMap(tk.Canvas):
         self._draw_trail(self.car_trail, "#17a673")
         self._draw_trail(self.drone_trail, "#4263eb")
         self._draw_vehicle(self.telemetry.car.x, self.telemetry.car.y, self.telemetry.car.heading, "#17a673", "车")
-        self._draw_vehicle(self.telemetry.drone.x, self.telemetry.drone.y, self.telemetry.drone.heading, "#4263eb", "机")
+        if self.telemetry.drone.x is not None and self.telemetry.drone.y is not None:
+            drone_x, drone_y = drone_position_from_home(
+                self.telemetry.drone.x,
+                self.telemetry.drone.y,
+            )
+            self._draw_vehicle(
+                drone_x,
+                drone_y,
+                90.0 + self.telemetry.drone.heading,
+                "#4263eb",
+                "机",
+            )
 
     def _draw_trail(self, points: list[tuple[float, float]], color: str) -> None:
         if len(points) > 1:

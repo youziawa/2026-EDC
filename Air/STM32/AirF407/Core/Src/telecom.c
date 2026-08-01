@@ -64,6 +64,8 @@
 #define CAR_SPEED_MODE_WAITING_FOR_AIRCRAFT 4U
 #define CAR_STATE_DATA_LEN 13U
 #define CAR_STATE_TIMEOUT_MS 500U
+#define CAR_RETURN_RETRY_MS 200U
+#define AIR_GLOBAL_STATE_RETURN 9U
 
 /*
  * USART1：凌霄旧匿名0x05高度帧。
@@ -234,6 +236,9 @@ static uint32_t uart5_car_cmd_last_tick = 0U;
 static uint8_t uart5_car_cmd_run_id = 0U;
 static uint8_t uart5_car_cmd_send_count = 0U;
 static uint8_t uart5_car_accel_acknowledged = 0U;
+static uint8_t uart5_return_tx_buf[LXS1_MAX_FRAME];
+static uint32_t uart5_return_last_tick = 0U;
+static uint8_t uart5_return_run_id = 0U;
 
 /* USART1接收到的凌霄实际激光高度。 */
 FlightHeightData_t flight_height = {0};
@@ -1086,6 +1091,8 @@ void Telecom_UART5_Init(void)
     uart5_car_cmd_run_id = 0U;
     uart5_car_cmd_send_count = 0U;
     uart5_car_accel_acknowledged = 0U;
+    uart5_return_last_tick = 0U;
+    uart5_return_run_id = 0U;
     car_status.valid = 0U;
     car_status.rx_tick = HAL_GetTick();
     lxs1_parser_init(&uart5_parser);
@@ -1228,6 +1235,51 @@ void Telecom_RequestCarAccelerate(void)
         {
             uart5_car_cmd_send_count++;
         }
+    }
+}
+
+void Telecom_NotifyCarReturn(void)
+{
+    lxs1_frame_t frame;
+    size_t tx_len;
+    uint8_t run_id = Decision_GetRunId();
+    uint32_t now_tick = HAL_GetTick();
+
+    if ((run_id == 0U) ||
+        (Decision_IsTaskActive() == 0U) ||
+        (Decision_IsReturning() == 0U))
+    {
+        return;
+    }
+
+    if (uart5_return_run_id != run_id)
+    {
+        uart5_return_run_id = run_id;
+        uart5_return_last_tick = 0U;
+    }
+
+    if (((uint32_t)(now_tick - uart5_return_last_tick) <
+         CAR_RETURN_RETRY_MS) ||
+        (huart5.gState != HAL_UART_STATE_READY))
+    {
+        return;
+    }
+
+    frame.src = LXS1_NODE_AIR_MCU;
+    frame.dst = LXS1_NODE_CAR_MCU;
+    frame.msg_id = LXS1_MSG_TASK_STATE;
+    frame.data_len = 3U;
+    frame.data[0] = run_id;
+    frame.data[1] = Decision_GetTaskMode();
+    frame.data[2] = AIR_GLOBAL_STATE_RETURN;
+
+    tx_len = lxs1_encode(
+        &frame, uart5_return_tx_buf, sizeof(uart5_return_tx_buf));
+    if ((tx_len != 0U) &&
+        (HAL_UART_Transmit_IT(&huart5, uart5_return_tx_buf,
+                             (uint16_t)tx_len) == HAL_OK))
+    {
+        uart5_return_last_tick = now_tick;
     }
 }
 

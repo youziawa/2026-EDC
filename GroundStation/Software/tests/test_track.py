@@ -1,7 +1,11 @@
 import math
 import unittest
 
-from ground_station.track import TRACK_LENGTH_CM, position_from_mileage
+from ground_station.track import (
+    TRACK_LENGTH_CM,
+    drone_position_from_home,
+    position_from_mileage,
+)
 
 
 class TrackTests(unittest.TestCase):
@@ -22,6 +26,13 @@ class TrackTests(unittest.TestCase):
         third_lap = position_from_mileage(2 * TRACK_LENGTH_CM + 123)
         for actual, expected in zip(third_lap, first_lap):
             self.assertAlmostEqual(actual, expected, places=5)
+
+    def test_aircraft_origin_is_map_point_h(self):
+        self.assertEqual(drone_position_from_home(0, 0), (112.5, 112.5))
+
+    def test_aircraft_axes_are_rotated_into_map_axes(self):
+        field = drone_position_from_home(200, -40)
+        self.assertEqual(field, (152.5, 312.5))
 
 
 if __name__ == "__main__":

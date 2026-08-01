@@ -19,15 +19,17 @@ uint16_t cur_waypoint_index;
 #define PID_SCALE 100 // 该结构体定义了PID控制器的参数和状态变量
 /* 位置控制速度规划 */
 #define MOVE_CRUISE_ERR_CM 20
-#define MOVE_CRUISE_SPEED 15//巡航速度
-#define VISION_CHASE_SPEED 18//视觉追车速度；限制重捕获时的大幅修正
+#define MOVE_CRUISE_SPEED 20//起飞后先右再前的追车航线速度
+#define MOVE_RETURN_SPEED 25//抛物后返回起飞点的速度
+#define VISION_CHASE_SPEED 22//视觉追车速度；限制重捕获时的大幅修正
 #define MOVE_APPROACH_MIN_SPEED 5
 // 平滑斜率限制（每周期最大变化量，与pid.slew_limit一致）
 #define SMOOTH_SLEW_LIMIT 2
 /* yaw进入允许范围后，再稳定200ms才确认方向已经改变 */
 #define MOVE_TURN_CONFIRM_TICKS 10U
-/* TASK_START 后只爬升、稳定，随后再开始水平航线。 */
-#define TASK_TAKEOFF_SETTLE_MS 4250U
+/* TASK_START后直接起飞至125 cm并保持3 s，6 s后释放水平航线。 */
+#define TASK_TAKEOFF_SETTLE_MS 6000U
+#define TASK_ROUTE_FIRST_WAYPOINT_INDEX 1U
 
 /*
  * K230 pixel-to-body-coordinate calibration.
@@ -115,6 +117,7 @@ static MoveCmd_t move_cmd;
 static uint32_t move_last_tick;
 static uint8_t move_launch_run_id;
 static uint32_t move_launch_start_tick;
+static uint8_t move_launch_active;
 static uint8_t move_arrival_handled; // 是否已处理当前航点的到达事件, 用于避免重复触发
 static uint8_t move_arrival_confirm_ticks;
 #if (MOVE_ENABLE_HOVER == 1U)
@@ -600,6 +603,8 @@ void Move_VisionFollowStop(void)
     MovePid_Reset(&pid_yaw);
 
     move_arrival_confirm_ticks = 0U;
+    move_arrival_handled = 0U;
+    move_prev_waypoint_index = 0xFFFFU;
 #if (MOVE_ENABLE_HOVER == 1U)
     move_hover_active = 0U;
     move_hover_start_tick = 0U;
@@ -1131,6 +1136,7 @@ void Move_Init(void) // 该结构体是移动指令值，并记录上次更新�
     move_last_tick = HAL_GetTick();
     move_launch_run_id = 0U;
     move_launch_start_tick = 0U;
+    move_launch_active = 0U;
 
     // 到达事件处理标志
     move_arrival_handled = 0;
@@ -1243,6 +1249,7 @@ void Move_Update(void)
      */
     if (Decision_IsTaskActive() == 0U)
     {
+        move_launch_active = 0U;
         move_launch_run_id = 0U;
         move_launch_start_tick = 0U;
         Move_StopHorizontal();
@@ -1253,15 +1260,25 @@ void Move_Update(void)
         return;
     }
 
-    /*
-     * A new run starts the shared 70 cm -> 125 cm launch clock.
-     * Horizontal navigation stays locked through the fast climb and the
-     * mandatory three-second hover at the final altitude.
-     */
-    if (move_launch_run_id != Decision_GetRunId())
+    /* 新任务与凌霄起飞共用时钟；约3 s起飞并保持3 s后释放水平航线。 */
+    if ((move_launch_active == 0U) ||
+        (move_launch_run_id != Decision_GetRunId()))
     {
+        move_launch_active = 1U;
         move_launch_run_id = Decision_GetRunId();
         move_launch_start_tick = now_tick;
+        Move_VisionFollowStop();
+
+        /*
+         * 航点0只是起飞原点。任务开始后预置到航点1，6秒起飞门控
+         * 解除时立即执行“先向右”，避免再次等待原点到达判定。
+         */
+        if ((Decision_IsReturning() == 0U) &&
+            (waypoint_count > TASK_ROUTE_FIRST_WAYPOINT_INDEX))
+        {
+            (void)Location_SetCurrentWaypointIndex(
+                TASK_ROUTE_FIRST_WAYPOINT_INDEX);
+        }
         Move_StopHorizontal();
         move_cmd.dyaw = 0;
         MovePid_Reset(&pid_x);
@@ -1290,6 +1307,7 @@ void Move_Update(void)
      * when the aircraft reaches index 2 before the later-starting car moves.
      */
     if ((vision_follow_armed == 0U) &&
+        (Decision_IsReturning() == 0U) &&
         (current_waypoint_index >= VISION_ARM_MIN_WAYPOINT_INDEX) &&
         (Decision_IsTaskActive() != 0U))
     {
@@ -1337,13 +1355,15 @@ if (heading_ready != 0U)
         MovePid_Step(&pid_x,
                      body_err_x,
                      1U,
-                     MOVE_CRUISE_SPEED);
+                     (Decision_IsReturning() != 0U) ?
+                         MOVE_RETURN_SPEED : MOVE_CRUISE_SPEED);
 
     move_cmd.dy =
         MovePid_Step(&pid_y,
                      body_err_y,
                      1U,
-                     MOVE_CRUISE_SPEED);
+                     (Decision_IsReturning() != 0U) ?
+                         MOVE_RETURN_SPEED : MOVE_CRUISE_SPEED);
 }
 else
 {
@@ -1357,7 +1377,10 @@ move_cmd.dyaw =
                  MOVE_CRUISE_SPEED);
 
     // 存在下一航点判定标志位的逻辑
-    has_next_waypoint = (uint8_t)((waypoint_count > 0U) && ((uint16_t)(current_waypoint_index + 1U) < waypoint_count));
+    has_next_waypoint = (uint8_t)(
+        (Decision_IsReturning() == 0U) &&
+        (waypoint_count > 0U) &&
+        ((uint16_t)(current_waypoint_index + 1U) < waypoint_count));
 
     // 到达当前航点判定：当x、y、yaw误差都在容忍范围内时认为到达
 // 严格到达判断：X、Y必须进入±5cm，yaw误差必须在允许范围内
@@ -1489,6 +1512,7 @@ const MoveCmd_t *Move_GetLastCmd(void)
 uint32_t Move_GetLaunchElapsedMs(void)
 {
     if ((Decision_IsTaskActive() == 0U) ||
+        (move_launch_active == 0U) ||
         (move_launch_run_id != Decision_GetRunId()))
     {
         return 0U;

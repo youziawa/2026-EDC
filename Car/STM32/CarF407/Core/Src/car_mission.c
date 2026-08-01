@@ -337,12 +337,19 @@ static void process_received(void)
     {
       mission.aircraft_global_state = frame->data[2];
       if ((mission.aircraft_global_state == GLOBAL_STATE_RETURN) &&
-          (mission.state == CAR_STATE_ACTION_SLOW))
+          (mission.state >= CAR_STATE_NORMAL_TRACK) &&
+          (mission.state <= CAR_STATE_REACQUIRE))
       {
+        /* Aircraft has dropped and left visual follow: finish the lap normally. */
+        mission.pre_loss_state = CAR_STATE_NORMAL_TRACK;
         LineFollow_SetCruiseSpeedMmps(
             (mission.awaiting_aircraft_catch != 0U) ?
             AB_INITIAL_SPEED_MM_S : NORMAL_SPEED_MM_S);
-        enter_state(CAR_STATE_NORMAL_TRACK);
+        if ((mission.state == CAR_STATE_NORMAL_TRACK) ||
+            (mission.state == CAR_STATE_ACTION_SLOW))
+        {
+          enter_state(CAR_STATE_NORMAL_TRACK);
+        }
       }
     }
   }
