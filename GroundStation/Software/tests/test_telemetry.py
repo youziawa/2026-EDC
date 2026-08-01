@@ -87,6 +87,13 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(model.drone.speed, 50)
         self.assertEqual(model.battery_mv, 16000)
 
+    def test_air_f407_xy_pose_updates_drone_position(self):
+        model = Telemetry()
+        data = struct.pack("<hh", 200, -40)
+        model.apply(Frame(2, 6, 0x22, data), 2.5)
+        self.assertEqual((model.drone.x, model.drone.y), (200, -40))
+        self.assertEqual(model.drone.last_update, 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()

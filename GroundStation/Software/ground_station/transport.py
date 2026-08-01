@@ -23,8 +23,15 @@ def list_ports() -> list[tuple[str, str]]:
 
 
 class SerialTransport:
-    def __init__(self, events: Queue[tuple[str, Any]]) -> None:
+    def __init__(
+        self,
+        events: Queue[tuple[str, str, Any]],
+        channel: str,
+        display_name: str,
+    ) -> None:
         self.events = events
+        self.channel = channel
+        self.display_name = display_name
         self.serial = None
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
@@ -33,27 +40,50 @@ class SerialTransport:
     def connected(self) -> bool:
         return bool(self.serial and self.serial.is_open)
 
+    @property
+    def port(self) -> str | None:
+        return self.serial.port if self.serial else None
+
     def connect(self, port: str, baudrate: int) -> None:
         import serial
 
         self.disconnect()
         self.serial = serial.Serial(port, baudrate, timeout=0.1, write_timeout=0.5)
         self.stop_event.clear()
-        self.thread = threading.Thread(target=self._read_loop, name="serial-reader", daemon=True)
+        self.thread = threading.Thread(
+            target=self._read_loop,
+            name=f"{self.channel}-serial-reader",
+            daemon=True,
+        )
         self.thread.start()
-        self.events.put(("status", f"已连接 {port} @ {baudrate}"))
+        self.events.put((
+            "status",
+            self.channel,
+            f"{self.display_name}已连接 {port} @ {baudrate}",
+        ))
 
     def _read_loop(self) -> None:
         while not self.stop_event.is_set() and self.serial:
             try:
                 data = self.serial.read(max(1, self.serial.in_waiting))
                 if data:
-                    self.events.put(("bytes", data))
+                    self.events.put(("bytes", self.channel, data))
             except Exception as exc:
-                self.events.put(("error", f"串口读取失败：{exc}"))
+                self.events.put((
+                    "error",
+                    self.channel,
+                    f"{self.display_name}串口读取失败：{exc}",
+                ))
                 break
         if not self.stop_event.is_set():
-            self.events.put(("disconnected", None))
+            current = self.serial
+            self.serial = None
+            if current:
+                try:
+                    current.close()
+                except Exception:
+                    pass
+            self.events.put(("disconnected", self.channel, None))
 
     def write(self, data: bytes) -> None:
         if not self.connected:

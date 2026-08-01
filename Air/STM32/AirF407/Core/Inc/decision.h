@@ -31,6 +31,7 @@ uint8_t Decision_GetRunId(void);
 uint8_t Decision_IsTaskActive(void);
 uint8_t Decision_IsMagnetOn(void);
 uint8_t Decision_IsPayloadReleased(void);
+uint8_t Decision_IsReturning(void);
 
 #ifdef __cplusplus
 }

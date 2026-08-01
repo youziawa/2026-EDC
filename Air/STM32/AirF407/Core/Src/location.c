@@ -20,6 +20,10 @@ static target_location_t g_waypoints[] =
 
 static uint16_t g_current_waypoint_index = 0; // 当前航点索引
 static uint8_t g_mission_done_pending = 0;
+static uint8_t g_return_home_active = 0U;
+
+/* 先在125 cm返航到原点，随后由凌霄一键降落到z=0。 */
+static const target_location_t g_return_home = {0, 0, 125, 0};
 
 void Location_InitWaypoints(void) // 初始化航点列表，并将目标位置设置为第一个航点。若无航点，则目标位置为0。
 {
@@ -31,11 +35,13 @@ void Location_InitWaypoints(void) // 初始化航点列表，并将目标位置�
         target_location.yaw = 0;
         g_current_waypoint_index = 0;
         g_mission_done_pending = 0;
+        g_return_home_active = 0U;
         return;
     }
 
     g_current_waypoint_index = 0;
     g_mission_done_pending = 0;
+    g_return_home_active = 0U;
     target_location = g_waypoints[g_current_waypoint_index];
 }
 
@@ -45,7 +51,7 @@ int16_t Location_GetCurrentWaypointZ(void) // 获取当前航点的z值（高度
     {
         return 0;
     }
-    return g_waypoints[g_current_waypoint_index].z; // 有航点时返回当前航点的z值
+    return target_location.z;
 }
 
 uint16_t Location_GetWaypointCount(void) // 返回航点总数
@@ -70,6 +76,7 @@ uint8_t Location_SetCurrentWaypointIndex(uint16_t index)
 
     g_current_waypoint_index = index;                        // 更新当前航点索引为指定值
     g_mission_done_pending = 0;                              // 降落标识不待发送
+    g_return_home_active = 0U;
     target_location = g_waypoints[g_current_waypoint_index]; // 更新目标位置为当前航点的位姿
     return 1;
 }
@@ -92,6 +99,7 @@ uint8_t Location_AdvanceWaypoint(void) // 将当前航点索引前进到下一�
 
     g_current_waypoint_index = next_index;                   // 更新当前航点索引为下一个航点
     g_mission_done_pending = 0U;                             // 降落标识不待发送
+    g_return_home_active = 0U;
     target_location = g_waypoints[g_current_waypoint_index]; // 更新目标位置为下一个航点的位姿
     return 1U;
 }
@@ -106,6 +114,28 @@ uint8_t Location_IsCurrentWaypointLast(void) // 判断当前航点是否为最�
     }
 
     return (uint8_t)((g_current_waypoint_index + 1U) >= count);
+}
+
+void Location_StartReturnHome(void)
+{
+    if (WAYPOINT_COUNT > 0U)
+    {
+        /* 复用最后航点的“到点即任务完成”判定，但目标改为原点。 */
+        g_current_waypoint_index = (uint16_t)(WAYPOINT_COUNT - 1U);
+    }
+    else
+    {
+        g_current_waypoint_index = 0U;
+    }
+
+    g_return_home_active = 1U;
+    g_mission_done_pending = 0U;
+    target_location = g_return_home;
+}
+
+uint8_t Location_IsReturnHomeActive(void)
+{
+    return g_return_home_active;
 }
 
 void Location_SetMissionDonePending(uint8_t pending) // 设置降落标识待发送状态，1表示待发送，0表示不待发送

@@ -4,6 +4,7 @@
 #include "location.h"
 #include "move.h"
 #include "decision.h"
+#include "lxs1_protocol.h"
 #include <stdio.h>
 
 // 位姿帧: FB + x/y/z/yaw(各2字节) + 0D
@@ -15,11 +16,12 @@
 // 位姿发送周期: 50ms (20Hz)
 #define TRANSMIT_POSE_PERIOD_MS 50U
 
-/* Fast two-stage launch, followed by a mandatory 3 s hover at 125 cm. */
-#define TAKEOFF_LOW_TARGET_CM 70
-#define TAKEOFF_LOW_HOLD_MS   500U
-#define TAKEOFF_RAMP_MS       750U
-#define TAKEOFF_FINAL_HOVER_MS 3000U
+/* Lingxiao直接起飞到125 cm，用约3 s起飞并在该高度保持3 s。 */
+#define LINGXIAO_TAKEOFF_TARGET_CM 125
+#define LINGXIAO_TAKEOFF_MS        3000U
+#define TAKEOFF_FINAL_HOVER_MS     3000U
+#define TAKEOFF_TOTAL_MS           \
+    (LINGXIAO_TAKEOFF_MS + TAKEOFF_FINAL_HOVER_MS)
 
 
 // 位姿发送模式: 0=正常位姿, 1=固定测试位姿(未启用分支会被预处理裁掉)
@@ -37,8 +39,8 @@
 // USART2自定义发送帧最大长度, 后续可按协议调整
 #define USART2_CUSTOM_FRAME_MAX_LEN 32U
 
-#define USART2_POSE_DEBUG_PERIOD_MS 250U
-#define USART2_DEBUG_TEXT_MAX_LEN 256U
+/* 地面站蓝牙链路：10 Hz发送飞机X/Y坐标。 */
+#define USART2_GROUND_POSE_PERIOD_MS 100U
 
 static uint8_t pose_tx_buf[POSE_FRAME_LEN];                       // 位姿帧发送包
 static uint8_t usart2_custom_tx_buf[USART2_CUSTOM_FRAME_MAX_LEN]; // USART2自定义发送缓存
@@ -58,68 +60,28 @@ static uint32_t pose_last_tick = 0U;
 uint8_t board1 = 0; // 占位值，代表棋盘面ABCD
 uint8_t board2 = 0; // 占位值，代表棋盘格123456
 
+#if (TRANSMIT_POSE_TEST_MODE == 1U)
 static void PointChoose(void);
+#endif
 
-/*
- * Before TASK_START, keep Lingxiao's altitude target at ground level.  A run
- * commands 70 cm briefly, ramps continuously to the 125 cm waypoint height,
- * then holds that height while Move keeps horizontal navigation locked.
- */
+/* 起飞阶段始终发送125 cm，6 s结束后恢复发送当前航点高度。 */
 static int16_t Transmit_GetCommandedHeightCm(void)
 {
     uint32_t elapsed_ms;
-    int32_t final_height_cm;
-    int32_t ramp_height_cm;
 
     if (Decision_IsTaskActive() == 0U)
     {
         return 0;
     }
 
-    /* Use Move's clock so altitude phases and XY release share one origin. */
+    /* 与Move共用时钟，确保高度阶段和水平航线同时切换。 */
     elapsed_ms = Move_GetLaunchElapsedMs();
-    if (elapsed_ms < TAKEOFF_LOW_HOLD_MS)
+    if (elapsed_ms < TAKEOFF_TOTAL_MS)
     {
-        return TAKEOFF_LOW_TARGET_CM;
+        return LINGXIAO_TAKEOFF_TARGET_CM;
     }
 
-    final_height_cm = Location_GetCurrentWaypointZ();
-    if (elapsed_ms < (TAKEOFF_LOW_HOLD_MS + TAKEOFF_RAMP_MS))
-    {
-        elapsed_ms -= TAKEOFF_LOW_HOLD_MS;
-        ramp_height_cm = TAKEOFF_LOW_TARGET_CM +
-            ((final_height_cm - TAKEOFF_LOW_TARGET_CM) *
-             (int32_t)elapsed_ms / (int32_t)TAKEOFF_RAMP_MS);
-        return (int16_t)ramp_height_cm;
-    }
-
-    return (int16_t)final_height_cm;
-}
-
-static const char *Transmit_TakeoffPhaseName(void)
-{
-    uint32_t elapsed_ms;
-
-    if (Decision_IsTaskActive() == 0U)
-    {
-        return "READY";
-    }
-
-    elapsed_ms = Move_GetLaunchElapsedMs();
-    if (elapsed_ms < TAKEOFF_LOW_HOLD_MS)
-    {
-        return "TAKEOFF_70";
-    }
-    if (elapsed_ms < (TAKEOFF_LOW_HOLD_MS + TAKEOFF_RAMP_MS))
-    {
-        return "CLIMB_125";
-    }
-    if (elapsed_ms < (TAKEOFF_LOW_HOLD_MS + TAKEOFF_RAMP_MS +
-                      TAKEOFF_FINAL_HOVER_MS))
-    {
-        return "HOVER_3S";
-    }
-    return "ROUTE";
+    return (int16_t)Location_GetCurrentWaypointZ();
 }
 
 // 通用中断发送入口定义: 由调用方指定串口句柄(huart1/huart2)
@@ -278,7 +240,8 @@ void Transmit_Update(void)
 
 // 构建USART2发送帧: 在此填写具体协议数据, 返回实际发送长度(字节)
 
-void PointChoose(void)
+#if (TRANSMIT_POSE_TEST_MODE == 1U)
+static void PointChoose(void)
 {
     if (board >= 1 && board <= 6)
     {
@@ -333,23 +296,28 @@ void PointChoose(void)
         }
     }
 }
+#endif
 
 static uint16_t Transmit_SkytoLandUsart2Frame(uint8_t *buf, uint16_t max_len)
 {
-    if (max_len < 5U)
-    {
-        return 0U;
-    }
+    lxs1_frame_t frame;
+    size_t tx_len;
+    int16_t x_cm = pose_data.x;
+    int16_t y_cm = pose_data.y;
 
-    PointChoose();
+    frame.src = LXS1_NODE_AIR_MCU;
+    frame.dst = LXS1_NODE_GROUND;
+    frame.msg_id = LXS1_MSG_FC_POSE;
+    frame.data_len = 4U;
 
-    buf[0] = 0xFE;
-    buf[1] = (uint8_t)((board1 >= 'A' && board1 <= 'D') ? (board1 - 'A' + 0x0AU) : 0U);
-    buf[2] = (uint8_t)board2;
-    buf[3] = (uint8_t)camera_number;
-    buf[4] = 0xFF;
+    /* FC_POSE payload: int16 little-endian x_cm, y_cm. */
+    frame.data[0] = (uint8_t)((uint16_t)x_cm & 0xFFU);
+    frame.data[1] = (uint8_t)(((uint16_t)x_cm >> 8) & 0xFFU);
+    frame.data[2] = (uint8_t)((uint16_t)y_cm & 0xFFU);
+    frame.data[3] = (uint8_t)(((uint16_t)y_cm >> 8) & 0xFFU);
 
-    return 5U;
+    tx_len = lxs1_encode(&frame, buf, max_len);
+    return (uint16_t)tx_len;
 }
 
 // USART2自定义发送入口: 打包后通过中断发送, 串口忙或无有效数据时返回0
@@ -366,162 +334,21 @@ uint8_t Transmit_SendCustomUsart2(void)
     return Transmit_StartRawIT(&huart2, usart2_custom_tx_buf, tx_len);
 }
 
-static const char *Transmit_TaskName(uint8_t mode)
-{
-    if (mode == AIR_TASK_DROP) return "DROP";
-    if (mode == AIR_TASK_DYNAMIC_LANDING) return "LAND";
-    return "NONE";
-}
-
-static const char *Transmit_VisionModeName(int16_t mode)
-{
-    if (mode == VISION_MODE_ACQUIRE) return "ACQUIRE";
-    if (mode == VISION_MODE_TRACK) return "TRACK";
-    if (mode == VISION_MODE_LOST) return "LOST";
-    return "UNKNOWN";
-}
-
-static const char *Transmit_CarStateName(uint8_t state)
-{
-    static const char *const names[] = {
-        "READY", "STARTING", "NORMAL", "ACTION_SLOW", "LOST_HOLD",
-        "REACQUIRE", "FINISH", "DONE", "ABORT", "FAULT"
-    };
-    return (state < (uint8_t)(sizeof(names) / sizeof(names[0]))) ?
-        names[state] : "UNKNOWN";
-}
-
-static const char *Transmit_ControlModeName(const MoveVisionDebug_t *vision,
-                                            uint8_t vision_valid)
-{
-    if (vision->following != 0U)
-    {
-        return (vision_valid != 0U) ? "VISION_FOLLOW" : "VISION_HOLD";
-    }
-    return (vision->armed != 0U) ? "VISION_SEARCH" : "WAYPOINT";
-}
-
-/* USART2/XCOM: rotate compact single-line pages to avoid long BLE packets. */
+/* USART2/蓝牙：只向地面站发送LXS1 FC_POSE坐标帧。 */
 void Transmit_UpdateUsart2(void)
 {
     static uint32_t last_time = 0U;
-    static uint8_t page = 0U;
-    static char text[USART2_DEBUG_TEXT_MAX_LEN];
-    const MoveVisionDebug_t *vision;
-    const MoveCmd_t *cmd;
-    const CarStatusData_t *car;
     uint32_t now_tick;
-    int32_t height_cm;
-    uint8_t height_valid;
-    uint8_t pose_valid;
-    uint8_t vision_valid;
-    uint8_t k230_online;
-    uint8_t car_online;
-    int len;
 
     now_tick = HAL_GetTick();
-    if ((uint32_t)(now_tick - last_time) < USART2_POSE_DEBUG_PERIOD_MS)
-    {
-        return;
-    }
-    if (huart2.gState != HAL_UART_STATE_READY)
+    if ((uint32_t)(now_tick - last_time) < USART2_GROUND_POSE_PERIOD_MS)
     {
         return;
     }
 
-    last_time = now_tick;
-    vision = Move_GetVisionDebug();
-    cmd = Move_GetLastCmd();
-    car = Telecom_GetCarStatus();
-    pose_valid = Telecom_IsPoseValid();
-    vision_valid = Telecom_IsVisionValid();
-    k230_online = Telecom_IsK230Online();
-    car_online = Telecom_IsCarStatusValid();
-    height_valid = Telecom_GetFlightHeightCm(&height_cm);
-    if (height_valid == 0U) height_cm = -1;
-
-    switch (page)
+    if (Transmit_SendCustomUsart2() != 0U)
     {
-    case 0U:
-        len = snprintf(
-            text, sizeof(text),
-            "[SYS t=%lu] run=%u task=%s active=%u launch=%s wp=%u ctrl=%s "
-            "pose=%u xyz=%d,%d,%d yaw=%d cmd=%d,%d,z%d,%d h=%ld/%u\r\n",
-            (unsigned long)now_tick,
-            (unsigned int)Decision_GetRunId(),
-            Transmit_TaskName(Decision_GetTaskMode()),
-            (unsigned int)Decision_IsTaskActive(),
-            Transmit_TakeoffPhaseName(),
-            (unsigned int)Location_GetCurrentWaypointIndex(),
-            Transmit_ControlModeName(vision, vision_valid),
-            (unsigned int)pose_valid,
-            (int)pose_data.x, (int)pose_data.y, (int)pose_data.z,
-            (int)pose_data.yaw,
-            (int)cmd->dx, (int)cmd->dy,
-            (int)Transmit_GetCommandedHeightCm(), (int)cmd->dyaw,
-            (long)height_cm, (unsigned int)height_valid);
-        break;
-
-    case 1U:
-        len = snprintf(
-            text, sizeof(text),
-            "[VIS t=%lu] link=%u valid=%u mode=%s conf=%u px=%d,%d,r%d "
-            "err=%.1f,%.1f arm=%u follow=%u fine=%u\r\n",
-            (unsigned long)now_tick,
-            (unsigned int)k230_online, (unsigned int)vision_valid,
-            Transmit_VisionModeName(vision_target.vision_mode),
-            (unsigned int)vision_target.confidence,
-            (int)vision_target.dx_px, (int)vision_target.dy_px,
-            (int)vision_target.radius_px,
-            (double)vision->filtered_body_x_cm,
-            (double)vision->filtered_body_y_cm,
-            (unsigned int)vision->armed,
-            (unsigned int)vision->following,
-            (unsigned int)vision->small_range);
-        break;
-
-    case 2U:
-        len = snprintf(
-            text, sizeof(text),
-            "[CAR t=%lu] link=%u run=%u state=%s speed=%u path=%lu "
-            "line=%u fault=%04X wait=%u finish=%u accel=%u/%u\r\n",
-            (unsigned long)now_tick,
-            (unsigned int)car_online, (unsigned int)car->run_id,
-            Transmit_CarStateName(car->state),
-            (unsigned int)car->speed_mm_s, (unsigned long)car->path_mm,
-            (unsigned int)car->line_valid, (unsigned int)car->fault,
-            (unsigned int)(car->speed_mode == 4U),
-            (unsigned int)car->finish_marker,
-            (unsigned int)Telecom_GetCarAccelerationSendCount(),
-            (unsigned int)Telecom_IsCarAccelerationAcknowledged());
-        break;
-
-    default:
-        len = snprintf(
-            text, sizeof(text),
-            "[COM t=%lu] k230_rx=%lu ok=%lu target=%lu hb=%lu err=%lu bad=%lu "
-            "car_rx=%lu task=%lu err=%lu bad=%lu\r\n",
-            (unsigned long)now_tick,
-            (unsigned long)Telecom_GetK230RxByteCount(),
-            (unsigned long)Telecom_GetK230ParsedFrameCount(),
-            (unsigned long)Telecom_GetK230TargetFrameCount(),
-            (unsigned long)Telecom_GetK230HeartbeatCount(),
-            (unsigned long)Telecom_GetK230UartErrorCount(),
-            (unsigned long)Telecom_GetK230BadPayloadCount(),
-            (unsigned long)Telecom_GetCarRxByteCount(),
-            (unsigned long)Telecom_GetCarTaskStartCount(),
-            (unsigned long)Telecom_GetCarUartErrorCount(),
-            (unsigned long)Telecom_GetCarBadTaskCount());
-        break;
-    }
-
-    if (len > 0)
-    {
-        if (len >= (int)sizeof(text)) len = (int)sizeof(text) - 1;
-        if (Transmit_StartRawIT(&huart2, (uint8_t *)text, (uint16_t)len) != 0U)
-        {
-            page = (uint8_t)((page + 1U) & 0x03U);
-        }
+        last_time = now_tick;
     }
 }
 ////////////////////////////////////////////////////////////////////

@@ -180,6 +180,9 @@ void Telecom_RequestVisionStart(void);
 /* Notify the car that visual takeover succeeded and it may accelerate. */
 void Telecom_RequestCarAccelerate(void);
 
+/* Repeatedly notify the car that payload release is complete and return began. */
+void Telecom_NotifyCarReturn(void);
+
 /*
  * 处理USART2地面站、UART5小车和USART3摄像头接收缓冲区。
  *

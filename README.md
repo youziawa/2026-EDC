@@ -16,6 +16,10 @@
 ## 目录
 
 ```text
+Air/
+  STM32/AirF407/       飞机任务主控工程
+  K230/                红色标记视觉跟踪程序
+  Lingxiao/            凌霄飞控工程（底层源码修改须审核）
 Car/
   STM32/CarF407/       小车主控完整CMake/CubeMX工程
     firmware/          已验证的可烧录ELF
@@ -74,9 +78,8 @@ python -B -m unittest discover -s GroundStation\Software\tests -t GroundStation\
 
 ## 当前限制
 
-- 图形化地面站已实现，支持LXS1 v1.1、小车里程地图定位、任务状态、日志、
-  `TASK_ABORT`和无硬件演示。入口为 `GroundStation/Software/main.py`。
-- 地面站GUI当前接收单个串口字节流；正式双链路需要地面站F103把飞机和小车
-  两路ECB02原始LXS1帧汇聚到一个PC串口，或后续扩展GUI同时打开两个COM口。
-- 飞机主控、凌霄飞控适配层和天空端K230代码由对应负责人对接实现。
+- 图形化地面站支持飞机和小车双串口同时连接、实时坐标及轨迹显示和CSV日志；
+  已按任务要求删除演示模式和地面站主动终止任务功能。
+- 飞机坐标以场地图 H 点为 `(0,0)`，地面站不显示飞机电量与高度。
+- 飞机 F407、天空端 K230、小车 STM32/K230 与凌霄飞控工程均已同步至本仓库。
 - ECB02为点对点链路，飞机、小车、地面站各需要两块模块。
