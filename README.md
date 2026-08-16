@@ -4,7 +4,7 @@
 
 系统由循线小车、无人机任务主控、机载/车载 K230 视觉、透明串口无线链路及图形化地面站组成。代码按设备职责拆分，通信接口集中维护，便于复现、移植和继续开发。
 
-> 本仓库面向竞赛复盘与工程学习。无人机与移动平台具有安全风险，请在断桨、架空或空旷受控环境中验证；不要直接用于载人、公共区域或其他安全关键场景。
+> 本仓库面向竞赛复盘与工程学习。无人机与移动平台具有安全风险，请在断桨、架空或空旷受控环境中验证；不可直接用于载人、公共区域或其他安全关键场景。
 
 ## 项目能力
 
@@ -36,7 +36,7 @@ docs/architecture/             任务状态机（Markdown 与 YAML）
 
 - [LXS1 通信协议](LXS1_通信协议/LXS1_PROTOCOL.md)：帧格式、节点地址、消息号和载荷定义。
 - [任务状态机](docs/architecture/mission-state-machine.md)：设备职责、状态流转和故障策略。
-- [机器可读状态机](docs/architecture/mission-state-machine.yaml)：状态机的 YAML 描述。
+- [机器可读状态机](docs/architecture/mission-state-machine.yaml)：状态机的 YAML 描述。（给AI看的版本）
 - [小车 K230 使用说明](Car/K230/README.md)：相机、显示、标定和部署。
 - [地面站使用说明](GroundStation/Software/README.md)：安装、串口和界面说明。
 
