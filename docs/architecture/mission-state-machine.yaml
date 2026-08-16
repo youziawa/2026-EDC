@@ -3,7 +3,7 @@ metadata:
   title: 陆空协同无人机系统统一状态机
   version: "1.0"
   language: zh-CN
-  human_document: 陆空协同统一状态机.md
+human_document: mission-state-machine.md
   protocol: LXS1
   intended_consumers:
     - firmware_engineer

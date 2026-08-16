@@ -4,7 +4,7 @@
 字节序：多字节整数统一小端序
 默认串口：`115200 8N1`
 
-本文件与 `land_air_state_machine.yaml`、小车 STM32 当前实现保持一致。凌霄飞控
+本文件与 `../docs/architecture/mission-state-machine.yaml`、小车 STM32 当前实现保持一致。凌霄飞控
 原厂协议不属于 LXS1，由飞机主控适配层转换。
 
 > **协议修订（2026-07-31）**：`0x40` 是天空端 K230 到飞机 F4 的**机载本地像素

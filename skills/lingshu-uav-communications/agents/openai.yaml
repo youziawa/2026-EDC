@@ -1,4 +1,0 @@
-interface:
-  display_name: "凌霄陆空协同通信"
-  short_description: "为凌霄飞控、STM32F407和K230设计与实现LXS1通信协议"
-  default_prompt: "请依据LXS1协议设计、实现或调试飞控、飞机主控、小车主控和K230视觉端之间的通信。"
