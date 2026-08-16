@@ -20,7 +20,7 @@
 Windows PowerShell：
 
 ```powershell
-cd D:\Lab\Program\2026\GroundBase\Software
+cd GroundStation\Software
 py -m pip install -r requirements.txt
 py main.py
 ```
@@ -32,7 +32,7 @@ Ubuntu：
 
 ```bash
 sudo apt install python3 python3-tk
-cd GroundBase/Software
+cd GroundStation/Software
 python3 -m pip install -r requirements.txt
 python3 main.py
 ```

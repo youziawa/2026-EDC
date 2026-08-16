@@ -2,7 +2,7 @@
 
 版本：V1.0
 适用题目：D题《陆空协同无人机系统》
-配套机器可读规范：`land_air_state_machine.yaml`
+配套机器可读规范：`mission-state-machine.yaml`
 
 ## 1. 设计目标
 
